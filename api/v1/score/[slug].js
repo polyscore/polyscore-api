@@ -189,8 +189,8 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
 
 function computeParticipationMetrics(holders, allTrades) {
   const metrics = {};
+  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
 
-  // Get holder positions from top holders endpoint
   let allPositions = [];
   if (holders && Array.isArray(holders)) {
     for (const side of holders) {
@@ -200,7 +200,6 @@ function computeParticipationMetrics(holders, allTrades) {
     }
   }
 
-  // Count unique wallets from trades (much more accurate than top holders)
   const uniqueWallets = new Set();
   const tradeSizes = [];
   if (allTrades && allTrades.length > 0) {
@@ -211,46 +210,65 @@ function computeParticipationMetrics(holders, allTrades) {
     }
   }
 
+  // 1. Unique wallets
   const walletCount = uniqueWallets.size;
-  metrics.uniqueWallets = { value: walletCount, unit: 'count (from recent trades)', score: scoreBetween(walletCount, 10, 1000), signal: walletCount === 0 ? 'unavailable' : walletCount > 200 ? 'good' : walletCount > 50 ? 'neutral' : 'bad' };
+  metrics.uniqueWallets = { value: walletCount, unit: 'wallets', score: scoreBetween(walletCount, 10, 1000), signal: walletCount === 0 ? 'unavailable' : walletCount > 200 ? 'good' : walletCount > 50 ? 'neutral' : 'bad', context: walletCount === 0 ? null : walletCount > 200 ? 'Broad participation' : walletCount > 50 ? 'Moderate' : 'Low participation' };
 
-  // Concentration from top holders (still useful)
+  // 2. Top 5 Concentration
   const sorted = [...allPositions].sort((a, b) => b - a);
   const totalAmount = sorted.reduce((a, b) => a + b, 0);
-
   let top5Pct = null;
   if (totalAmount > 0 && sorted.length >= 5) top5Pct = (sorted.slice(0, 5).reduce((a,b) => a+b, 0) / totalAmount) * 100;
-  metrics.top5Concentration = { value: top5Pct != null ? parseFloat(top5Pct.toFixed(1)) : null, unit: '%', score: top5Pct != null ? (11 - scoreBetween(top5Pct, 20, 90)) : null, signal: top5Pct == null ? 'unavailable' : top5Pct < 30 ? 'good' : top5Pct < 60 ? 'neutral' : 'bad' };
+  metrics.top5Concentration = { value: fmt(top5Pct, 1), unit: '%', score: top5Pct != null ? (11 - scoreBetween(top5Pct, 20, 90)) : null, signal: top5Pct == null ? 'unavailable' : top5Pct < 30 ? 'good' : top5Pct < 60 ? 'neutral' : 'bad', context: top5Pct == null ? null : top5Pct < 30 ? 'Well distributed' : top5Pct > 60 ? 'Highly concentrated' : 'Moderate concentration' };
 
+  // 3. Top 10 Concentration
   let top10Pct = null;
   if (totalAmount > 0 && sorted.length >= 10) top10Pct = (sorted.slice(0, 10).reduce((a,b) => a+b, 0) / totalAmount) * 100;
-  metrics.top10Concentration = { value: top10Pct != null ? parseFloat(top10Pct.toFixed(1)) : null, unit: '%', score: top10Pct != null ? (11 - scoreBetween(top10Pct, 30, 95)) : null, signal: top10Pct == null ? 'unavailable' : top10Pct < 50 ? 'good' : top10Pct < 75 ? 'neutral' : 'bad' };
+  metrics.top10Concentration = { value: fmt(top10Pct, 1), unit: '%', score: top10Pct != null ? (11 - scoreBetween(top10Pct, 30, 95)) : null, signal: top10Pct == null ? 'unavailable' : top10Pct < 50 ? 'good' : top10Pct < 75 ? 'neutral' : 'bad', context: top10Pct == null ? null : top10Pct < 50 ? 'Diverse holders' : top10Pct > 75 ? 'Top-heavy' : 'Moderate' };
 
-  // Gini from top holders
+  // 4. Gini Coefficient
   let gini = null;
   if (sorted.length >= 2 && totalAmount > 0) { const n = sorted.length; const asc = [...allPositions].sort((a,b) => a-b); let s = 0; for (let i = 0; i < n; i++) s += (2*(i+1) - n - 1) * asc[i]; gini = Math.max(0, Math.min(1, s / (n * totalAmount))); }
-  metrics.giniCoefficient = { value: gini != null ? parseFloat(gini.toFixed(3)) : null, unit: 'index', score: gini != null ? (11 - scoreBetween(gini, 0.2, 0.95)) : null, signal: gini == null ? 'unavailable' : gini < 0.4 ? 'good' : gini < 0.7 ? 'neutral' : 'bad' };
+  metrics.giniCoefficient = { value: fmt(gini, 3), unit: 'index', score: gini != null ? (11 - scoreBetween(gini, 0.2, 0.95)) : null, signal: gini == null ? 'unavailable' : gini < 0.4 ? 'good' : gini < 0.7 ? 'neutral' : 'bad', context: gini == null ? null : gini < 0.4 ? 'Relatively equal' : gini > 0.7 ? 'Unequal distribution' : 'Moderate inequality' };
 
-  // Whale and retail from trade sizes (more representative than top holders)
-  const whaleCount = tradeSizes.filter(s => s > 10000).length;
+  // 5. Herfindahl-Hirschman Index (HHI) — NEW
+  let hhi = null;
+  if (sorted.length >= 2 && totalAmount > 0) {
+    hhi = 0;
+    for (const pos of sorted) { const share = (pos / totalAmount) * 100; hhi += share * share; }
+  }
+  metrics.herfindahlIndex = { value: fmt(hhi, 0), unit: 'HHI', score: hhi != null ? (11 - scoreBetween(hhi, 500, 5000)) : null, signal: hhi == null ? 'unavailable' : hhi < 1500 ? 'good' : hhi < 2500 ? 'neutral' : 'bad', context: hhi == null ? null : hhi < 1500 ? 'Competitive' : hhi > 2500 ? 'Highly concentrated' : 'Moderate concentration' };
+
+  // 6. Largest Position — NEW
+  const largestPos = sorted.length > 0 ? sorted[0] : null;
+  metrics.largestPosition = { value: fmt(largestPos, 2), unit: 'USD', score: null, signal: largestPos == null ? 'unavailable' : 'neutral', context: largestPos != null ? `$${Math.round(largestPos).toLocaleString()} largest holder` : null };
+
+  // 7. Small Trade Share (was retailRatio)
   const retailCount = tradeSizes.filter(s => s < 100).length;
   const retailRatio = tradeSizes.length > 0 ? (retailCount / tradeSizes.length) * 100 : null;
+  metrics.smallTradeShare = { value: fmt(retailRatio, 1), unit: '%', score: scoreBetween(retailRatio, 5, 70), signal: retailRatio == null ? 'unavailable' : retailRatio > 50 ? 'good' : retailRatio > 20 ? 'neutral' : 'bad', context: retailRatio == null ? null : retailRatio > 50 ? 'Retail-dominated' : retailRatio > 20 ? 'Mixed participation' : 'Whale-dominated' };
 
-  metrics.whaleCount = { value: whaleCount, unit: 'trades > $10K', score: null, signal: tradeSizes.length === 0 ? 'unavailable' : 'neutral' };
-  metrics.retailRatio = { value: retailRatio != null ? parseFloat(retailRatio.toFixed(1)) : null, unit: '% of trades < $100', score: scoreBetween(retailRatio, 5, 70), signal: retailRatio == null ? 'unavailable' : retailRatio > 50 ? 'good' : retailRatio > 20 ? 'neutral' : 'bad' };
+  // 8. Large Trade Count (was whaleCount)
+  const whaleCount = tradeSizes.filter(s => s > 10000).length;
+  metrics.largeTradeCount = { value: whaleCount, unit: 'trades > $10K', score: null, signal: tradeSizes.length === 0 ? 'unavailable' : 'neutral', context: null };
 
-  // Median trade size
+  // 9. Median Trade Size
   let medianTrade = null;
-  if (tradeSizes.length > 0) {
-    const sortedTrades = [...tradeSizes].sort((a, b) => a - b);
-    const mid = Math.floor(sortedTrades.length / 2);
-    medianTrade = sortedTrades.length % 2 !== 0 ? sortedTrades[mid] : (sortedTrades[mid-1] + sortedTrades[mid]) / 2;
-  }
-  metrics.medianTradeSize = { value: medianTrade != null ? parseFloat(medianTrade.toFixed(2)) : null, unit: 'USD', score: null, signal: medianTrade == null ? 'unavailable' : 'neutral' };
+  if (tradeSizes.length > 0) { const st = [...tradeSizes].sort((a, b) => a - b); const mid = Math.floor(st.length / 2); medianTrade = st.length % 2 !== 0 ? st[mid] : (st[mid-1] + st[mid]) / 2; }
+  metrics.medianTradeSize = { value: fmt(medianTrade, 2), unit: 'USD', score: null, signal: medianTrade == null ? 'unavailable' : 'neutral', context: medianTrade != null ? `Typical trade: $${fmt(medianTrade, 2)}` : null };
 
-  const scorable = ['uniqueWallets', 'top5Concentration', 'top10Concentration', 'giniCoefficient', 'retailRatio'];
+  // Pillar score
+  const scorable = ['uniqueWallets', 'top5Concentration', 'top10Concentration', 'giniCoefficient', 'herfindahlIndex', 'smallTradeShare'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  return { score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null, confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 7, metrics };
+  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
+
+  // Warning
+  let warning = null;
+  if (top5Pct != null && top5Pct > 60) warning = { type: 'danger', text: `High concentration risk. Top 5 wallets control ${fmt(top5Pct, 0)}% of open interest. Price may not reflect broad sentiment.` };
+  else if (walletCount > 0 && walletCount < 30) warning = { type: 'warning', text: `Low participation. Only ${walletCount} unique wallets detected.` };
+  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: `Broad participation with ${walletCount} wallets and ${fmt(retailRatio, 0)}% small trades.` };
+
+  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, metrics };
 }
 
 // ─── MATURITY PILLAR ─────────────────────────────────────────
