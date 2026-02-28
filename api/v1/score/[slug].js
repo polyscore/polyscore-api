@@ -1,7 +1,6 @@
-// ─── LIQUIDITY SCORING ───────────────────────────────────────
+// ─── SCORING HELPERS ─────────────────────────────────────────
 
 function scoreBetween(value, min, max) {
-  // Returns 1-10 where min=1 and max=10
   if (value == null) return null;
   if (value <= min) return 1;
   if (value >= max) return 10;
@@ -9,19 +8,20 @@ function scoreBetween(value, min, max) {
 }
 
 function scoreCloseTo(value, target, tolerance) {
-  // Returns 1-10 where closer to target = higher score
   if (value == null) return null;
   const distance = Math.abs(value - target);
   if (distance >= tolerance) return 1;
   return Math.round(10 - (distance / tolerance) * 9);
 }
 
-function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
-  const metrics = {};
+// ─── LIQUIDITY PILLAR ────────────────────────────────────────
 
-  // 1. Bid-ask spread (lower = better)
-  const spreadValue = spread?.spread ? parseFloat(spread.spread) : null;
+function computeLiquidityMetrics(orderbook, spread, midpoint, trades) {
+  const metrics = {};
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
+
+  // 1. Bid-ask spread
+  const spreadValue = spread?.spread ? parseFloat(spread.spread) : null;
   let spreadPct = null;
   if (spreadValue != null && midValue != null && midValue > 0) {
     spreadPct = (spreadValue / midValue) * 100;
@@ -33,7 +33,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
     signal: spreadPct == null ? 'unavailable' : spreadPct < 3 ? 'good' : spreadPct < 10 ? 'neutral' : 'bad',
   };
 
-  // 2. Depth at 1% — sum of orderbook within 1% of midpoint
+  // 2 & 3. Depth at 1% and 5%
   let depthAt1 = null;
   let depthAt5 = null;
   let bookImbalance = null;
@@ -41,7 +41,6 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
   if (orderbook && midValue) {
     const bids = orderbook.bids || [];
     const asks = orderbook.asks || [];
-
     let bidDepth1 = 0, askDepth1 = 0, bidDepth5 = 0, askDepth5 = 0;
     let totalBidDepth = 0, totalAskDepth = 0;
 
@@ -53,7 +52,6 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
       if (distPct <= 1) bidDepth1 += price * size;
       if (distPct <= 5) bidDepth5 += price * size;
     }
-
     for (const ask of asks) {
       const price = parseFloat(ask.price);
       const size = parseFloat(ask.size);
@@ -65,7 +63,6 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
 
     depthAt1 = bidDepth1 + askDepth1;
     depthAt5 = bidDepth5 + askDepth5;
-
     const totalDepth = totalBidDepth + totalAskDepth;
     bookImbalance = totalDepth > 0 ? totalBidDepth / totalDepth : null;
   }
@@ -84,7 +81,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
     signal: depthAt5 == null ? 'unavailable' : depthAt5 > 50000 ? 'good' : depthAt5 > 10000 ? 'neutral' : 'bad',
   };
 
-  // 4. Book imbalance (closer to 0.5 = better)
+  // 4. Book imbalance
   metrics.bookImbalance = {
     value: bookImbalance != null ? parseFloat(bookImbalance.toFixed(3)) : null,
     unit: 'ratio',
@@ -92,36 +89,34 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
     signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad',
   };
 
-  // 5 & 6. Volume from price history
+  // 5, 6, 7. Volume from trades
   let volume24h = null;
   let volume7d = null;
   let volumeTrend = null;
 
-  if (priceHistory30d) {
-    const history = Array.isArray(priceHistory30d.history)
-      ? priceHistory30d.history
-      : Array.isArray(priceHistory30d)
-        ? priceHistory30d
-        : [];
+  if (trades && Array.isArray(trades)) {
+    const now = Date.now() / 1000;
+    const oneDayAgo = now - 86400;
+    const sevenDaysAgo = now - 86400 * 7;
+    const fourteenDaysAgo = now - 86400 * 14;
 
-    if (history.length > 0) {
-      // Most recent candle = last element (or first, depending on sort)
-      // Sum last 1 day and last 7 days
-      const sorted = [...history].sort((a, b) => (a.t || 0) - (b.t || 0));
+    let vol24 = 0, vol7d = 0, volPrior7d = 0;
 
-      const last7 = sorted.slice(-7);
-      const prior7 = sorted.slice(-14, -7);
-      const last1 = sorted.slice(-1);
+    for (const trade of trades) {
+      const ts = trade.timestamp || trade.t || 0;
+      const size = parseFloat(trade.size || trade.amount || trade.makerAmountFilled || 0);
+      const price = parseFloat(trade.price || trade.p || 0);
+      const value = size * price;
 
-      volume24h = last1.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
-      volume7d = last7.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
+      if (ts >= oneDayAgo) vol24 += value;
+      if (ts >= sevenDaysAgo) vol7d += value;
+      if (ts >= fourteenDaysAgo && ts < sevenDaysAgo) volPrior7d += value;
+    }
 
-      if (prior7.length > 0) {
-        const priorVol = prior7.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
-        if (priorVol > 0) {
-          volumeTrend = ((volume7d - priorVol) / priorVol) * 100;
-        }
-      }
+    volume24h = vol24;
+    volume7d = vol7d;
+    if (volPrior7d > 0) {
+      volumeTrend = ((vol7d - volPrior7d) / volPrior7d) * 100;
     }
   }
 
@@ -146,7 +141,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
     signal: volumeTrend == null ? 'unavailable' : volumeTrend > 10 ? 'good' : volumeTrend > -10 ? 'neutral' : 'bad',
   };
 
-  // Compute pillar score (average of non-null metric scores)
+  // Pillar score
   const scores = Object.values(metrics).map(m => m.score).filter(s => s != null);
   const pillarScore = scores.length > 0
     ? parseFloat((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1))
@@ -183,7 +178,6 @@ module.exports = async function handler(req, res) {
   const marketSlug = slug.trim().toLowerCase();
 
   try {
-    // Step 1: Fetch market metadata from GAMMA
     const gammaRes = await fetch(
       `https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(marketSlug)}`
     );
@@ -192,11 +186,7 @@ module.exports = async function handler(req, res) {
 
     if (!markets || markets.length === 0) {
       return res.status(404).json({
-        error: {
-          code: 'MARKET_NOT_FOUND',
-          message: `No market found with slug '${marketSlug}'`,
-          status: 404,
-        },
+        error: { code: 'MARKET_NOT_FOUND', message: `No market found with slug '${marketSlug}'`, status: 404 },
       });
     }
 
@@ -208,11 +198,10 @@ module.exports = async function handler(req, res) {
 
     if (!primaryTokenId) {
       return res.status(400).json({
-        error: { code: 'NO_TOKEN_IDS', message: 'This market has no CLOB token IDs.', status: 400 },
+        error: { code: 'NO_TOKEN_IDS', message: 'No CLOB token IDs.', status: 400 },
       });
     }
 
-    // Step 2: Fetch all data in parallel
     const startTime = Date.now();
 
     const results = await Promise.allSettled([
@@ -228,7 +217,6 @@ module.exports = async function handler(req, res) {
     ]);
 
     const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
-
     const get = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
 
     const orderbook = get(0);
@@ -241,10 +229,9 @@ module.exports = async function handler(req, res) {
     const openInterest = get(7);
     const marketTrades = get(8);
 
-    // Step 3: Compute Liquidity pillar
-    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d);
+    // Compute Liquidity pillar
+    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, trades);
 
-    // Step 4: Build response
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
     return res.status(200).json({
@@ -295,6 +282,7 @@ module.exports = async function handler(req, res) {
           daily30d: priceHistory30d ? { points: Array.isArray(priceHistory30d.history) ? priceHistory30d.history.length : Array.isArray(priceHistory30d) ? priceHistory30d.length : 0 } : null,
           hourly24h: priceHistory24h ? { points: Array.isArray(priceHistory24h.history) ? priceHistory24h.history.length : Array.isArray(priceHistory24h) ? priceHistory24h.length : 0 } : null,
         },
+        trades: trades ? { count: Array.isArray(trades) ? trades.length : 0, latest: Array.isArray(trades) ? trades.slice(0, 3) : null } : null,
         holders: holders ? { count: Array.isArray(holders) ? holders.length : 0 } : null,
         openInterest: openInterest || null,
         marketTrades: marketTrades ? { count: Array.isArray(marketTrades) ? marketTrades.length : 0 } : null,
