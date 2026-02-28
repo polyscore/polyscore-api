@@ -1,3 +1,168 @@
+// ─── LIQUIDITY SCORING ───────────────────────────────────────
+
+function scoreBetween(value, min, max) {
+  // Returns 1-10 where min=1 and max=10
+  if (value == null) return null;
+  if (value <= min) return 1;
+  if (value >= max) return 10;
+  return Math.round(1 + ((value - min) / (max - min)) * 9);
+}
+
+function scoreCloseTo(value, target, tolerance) {
+  // Returns 1-10 where closer to target = higher score
+  if (value == null) return null;
+  const distance = Math.abs(value - target);
+  if (distance >= tolerance) return 1;
+  return Math.round(10 - (distance / tolerance) * 9);
+}
+
+function computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d) {
+  const metrics = {};
+
+  // 1. Bid-ask spread (lower = better)
+  const spreadValue = spread?.spread ? parseFloat(spread.spread) : null;
+  const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
+  let spreadPct = null;
+  if (spreadValue != null && midValue != null && midValue > 0) {
+    spreadPct = (spreadValue / midValue) * 100;
+  }
+  metrics.bidAskSpread = {
+    value: spreadPct != null ? parseFloat(spreadPct.toFixed(2)) : null,
+    unit: '%',
+    score: spreadPct != null ? (11 - scoreBetween(spreadPct, 1, 25)) : null,
+    signal: spreadPct == null ? 'unavailable' : spreadPct < 3 ? 'good' : spreadPct < 10 ? 'neutral' : 'bad',
+  };
+
+  // 2. Depth at 1% — sum of orderbook within 1% of midpoint
+  let depthAt1 = null;
+  let depthAt5 = null;
+  let bookImbalance = null;
+
+  if (orderbook && midValue) {
+    const bids = orderbook.bids || [];
+    const asks = orderbook.asks || [];
+
+    let bidDepth1 = 0, askDepth1 = 0, bidDepth5 = 0, askDepth5 = 0;
+    let totalBidDepth = 0, totalAskDepth = 0;
+
+    for (const bid of bids) {
+      const price = parseFloat(bid.price);
+      const size = parseFloat(bid.size);
+      const distPct = ((midValue - price) / midValue) * 100;
+      totalBidDepth += price * size;
+      if (distPct <= 1) bidDepth1 += price * size;
+      if (distPct <= 5) bidDepth5 += price * size;
+    }
+
+    for (const ask of asks) {
+      const price = parseFloat(ask.price);
+      const size = parseFloat(ask.size);
+      const distPct = ((price - midValue) / midValue) * 100;
+      totalAskDepth += price * size;
+      if (distPct <= 1) askDepth1 += price * size;
+      if (distPct <= 5) askDepth5 += price * size;
+    }
+
+    depthAt1 = bidDepth1 + askDepth1;
+    depthAt5 = bidDepth5 + askDepth5;
+
+    const totalDepth = totalBidDepth + totalAskDepth;
+    bookImbalance = totalDepth > 0 ? totalBidDepth / totalDepth : null;
+  }
+
+  metrics.depthAt1Pct = {
+    value: depthAt1 != null ? parseFloat(depthAt1.toFixed(2)) : null,
+    unit: 'USD',
+    score: scoreBetween(depthAt1, 500, 50000),
+    signal: depthAt1 == null ? 'unavailable' : depthAt1 > 20000 ? 'good' : depthAt1 > 2000 ? 'neutral' : 'bad',
+  };
+
+  metrics.depthAt5Pct = {
+    value: depthAt5 != null ? parseFloat(depthAt5.toFixed(2)) : null,
+    unit: 'USD',
+    score: scoreBetween(depthAt5, 2000, 200000),
+    signal: depthAt5 == null ? 'unavailable' : depthAt5 > 50000 ? 'good' : depthAt5 > 10000 ? 'neutral' : 'bad',
+  };
+
+  // 4. Book imbalance (closer to 0.5 = better)
+  metrics.bookImbalance = {
+    value: bookImbalance != null ? parseFloat(bookImbalance.toFixed(3)) : null,
+    unit: 'ratio',
+    score: scoreCloseTo(bookImbalance, 0.5, 0.5),
+    signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad',
+  };
+
+  // 5 & 6. Volume from price history
+  let volume24h = null;
+  let volume7d = null;
+  let volumeTrend = null;
+
+  if (priceHistory30d) {
+    const history = Array.isArray(priceHistory30d.history)
+      ? priceHistory30d.history
+      : Array.isArray(priceHistory30d)
+        ? priceHistory30d
+        : [];
+
+    if (history.length > 0) {
+      // Most recent candle = last element (or first, depending on sort)
+      // Sum last 1 day and last 7 days
+      const sorted = [...history].sort((a, b) => (a.t || 0) - (b.t || 0));
+
+      const last7 = sorted.slice(-7);
+      const prior7 = sorted.slice(-14, -7);
+      const last1 = sorted.slice(-1);
+
+      volume24h = last1.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
+      volume7d = last7.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
+
+      if (prior7.length > 0) {
+        const priorVol = prior7.reduce((sum, c) => sum + (parseFloat(c.volume || c.v || 0)), 0);
+        if (priorVol > 0) {
+          volumeTrend = ((volume7d - priorVol) / priorVol) * 100;
+        }
+      }
+    }
+  }
+
+  metrics.volume24h = {
+    value: volume24h != null ? parseFloat(volume24h.toFixed(2)) : null,
+    unit: 'USD',
+    score: scoreBetween(volume24h, 1000, 500000),
+    signal: volume24h == null ? 'unavailable' : volume24h > 100000 ? 'good' : volume24h > 10000 ? 'neutral' : 'bad',
+  };
+
+  metrics.volume7d = {
+    value: volume7d != null ? parseFloat(volume7d.toFixed(2)) : null,
+    unit: 'USD',
+    score: scoreBetween(volume7d, 5000, 2000000),
+    signal: volume7d == null ? 'unavailable' : volume7d > 500000 ? 'good' : volume7d > 50000 ? 'neutral' : 'bad',
+  };
+
+  metrics.volumeTrend = {
+    value: volumeTrend != null ? parseFloat(volumeTrend.toFixed(1)) : null,
+    unit: '%',
+    score: volumeTrend != null ? scoreBetween(volumeTrend, -50, 100) : null,
+    signal: volumeTrend == null ? 'unavailable' : volumeTrend > 10 ? 'good' : volumeTrend > -10 ? 'neutral' : 'bad',
+  };
+
+  // Compute pillar score (average of non-null metric scores)
+  const scores = Object.values(metrics).map(m => m.score).filter(s => s != null);
+  const pillarScore = scores.length > 0
+    ? parseFloat((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1))
+    : null;
+
+  return {
+    score: pillarScore,
+    confidence: scores.length >= 5 ? 'high' : scores.length >= 3 ? 'medium' : 'low',
+    metricsComputed: scores.length,
+    metricsTotal: 7,
+    metrics,
+  };
+}
+
+// ─── MAIN HANDLER ────────────────────────────────────────────
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -36,26 +201,18 @@ module.exports = async function handler(req, res) {
     }
 
     const market = markets[0];
-
-    // Extract token IDs
-    const clobTokenIds = market.clobTokenIds
-      ? JSON.parse(market.clobTokenIds)
-      : [];
+    const clobTokenIds = market.clobTokenIds ? JSON.parse(market.clobTokenIds) : [];
     const conditionId = market.conditionId;
     const primaryTokenId = clobTokenIds[0];
     const secondaryTokenId = clobTokenIds[1];
 
     if (!primaryTokenId) {
       return res.status(400).json({
-        error: {
-          code: 'NO_TOKEN_IDS',
-          message: 'This market has no CLOB token IDs.',
-          status: 400,
-        },
+        error: { code: 'NO_TOKEN_IDS', message: 'This market has no CLOB token IDs.', status: 400 },
       });
     }
 
-    // Step 2: Fetch all data in parallel from CLOB + DATA APIs
+    // Step 2: Fetch all data in parallel
     const startTime = Date.now();
 
     const results = await Promise.allSettled([
@@ -73,7 +230,6 @@ module.exports = async function handler(req, res) {
     const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
 
     const get = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
-    const err = (i) => results[i].status === 'rejected' ? results[i].reason.message : null;
 
     const orderbook = get(0);
     const spread = get(1);
@@ -85,20 +241,15 @@ module.exports = async function handler(req, res) {
     const openInterest = get(7);
     const marketTrades = get(8);
 
-    // Collect any errors
-    const labels = ['orderbook', 'spread', 'midpoint', 'priceHistory30d', 'priceHistory24h', 'trades', 'holders', 'openInterest', 'marketTrades'];
-    const apiErrors = {};
-    labels.forEach((label, i) => {
-      const e = err(i);
-      if (e) apiErrors[label] = e;
-    });
+    // Step 3: Compute Liquidity pillar
+    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, priceHistory30d);
 
-    // Step 3: Build response
+    // Step 4: Build response
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
     return res.status(200).json({
       polyscore: null,
-      polyscoreStatus: 'Phase 0 — raw data only, scoring coming in Phase 1',
+      polyscoreStatus: 'Phase 1 — Liquidity pillar live, 4 more pillars coming',
       fetchTime: parseFloat(fetchTime),
 
       market: {
@@ -118,6 +269,19 @@ module.exports = async function handler(req, res) {
         tokenIds: { yes: primaryTokenId, no: secondaryTokenId || null },
       },
 
+      scores: {
+        overall: null,
+        liquidity: liquidity.score,
+        participation: null,
+        discovery: null,
+        resolution: null,
+        maturity: null,
+      },
+
+      pillars: {
+        liquidity,
+      },
+
       rawData: {
         orderbook: orderbook ? {
           bids: orderbook.bids ? orderbook.bids.length : 0,
@@ -131,13 +295,10 @@ module.exports = async function handler(req, res) {
           daily30d: priceHistory30d ? { points: Array.isArray(priceHistory30d.history) ? priceHistory30d.history.length : Array.isArray(priceHistory30d) ? priceHistory30d.length : 0 } : null,
           hourly24h: priceHistory24h ? { points: Array.isArray(priceHistory24h.history) ? priceHistory24h.history.length : Array.isArray(priceHistory24h) ? priceHistory24h.length : 0 } : null,
         },
-        trades: trades ? { count: Array.isArray(trades) ? trades.length : 0, latest: Array.isArray(trades) ? trades.slice(0, 3) : null } : null,
-        holders: holders || null,
+        holders: holders ? { count: Array.isArray(holders) ? holders.length : 0 } : null,
         openInterest: openInterest || null,
         marketTrades: marketTrades ? { count: Array.isArray(marketTrades) ? marketTrades.length : 0 } : null,
       },
-
-      apiErrors: Object.keys(apiErrors).length > 0 ? apiErrors : null,
     });
 
   } catch (err) {
