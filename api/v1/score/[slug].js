@@ -106,7 +106,6 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades) {
       if (ts >= sevenDaysAgo) vol7d += value;
       if (ts >= fourteenDaysAgo && ts < sevenDaysAgo) volPrior7d += value;
     }
-
     volume24h = vol24;
     volume7d = vol7d;
     if (volPrior7d > 0) {
@@ -155,7 +154,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
   const metrics = {};
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
 
-  // Extract price history into sorted array
   let history = [];
   if (priceHistory30d) {
     const raw = Array.isArray(priceHistory30d.history)
@@ -166,7 +164,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     history = [...raw].sort((a, b) => (a.t || 0) - (b.t || 0));
   }
 
-  // 1. Current price
   metrics.currentPrice = {
     value: midValue,
     unit: 'probability',
@@ -174,10 +171,8 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: midValue == null ? 'unavailable' : 'neutral',
   };
 
-  // 2. 24h price change
   let priceChange24h = null;
   if (history.length >= 2 && midValue != null) {
-    // Find the price ~24h ago (roughly the second-to-last point in hourly data, or estimate from daily)
     const priorPrice = history[history.length - 2]?.p;
     if (priorPrice != null && priorPrice > 0) {
       priceChange24h = ((midValue - priorPrice) / priorPrice) * 100;
@@ -190,7 +185,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: priceChange24h == null ? 'unavailable' : Math.abs(priceChange24h) > 10 ? 'warn' : 'neutral',
   };
 
-  // 3. 7d price range
   let low7d = null;
   let high7d = null;
   const last7 = history.slice(-7);
@@ -208,7 +202,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: low7d == null ? 'unavailable' : 'neutral',
   };
 
-  // 4. Realized volatility (7d) — standard deviation of returns
   let realizedVol7d = null;
   if (last7.length >= 3) {
     const prices = last7.map(c => c.p).filter(p => p != null);
@@ -224,7 +217,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
       realizedVol7d = Math.sqrt(variance) * 100;
     }
   }
-  // For prediction markets: moderate vol (2-10%) is healthy, very high (>30%) or near-zero is bad
   metrics.realizedVol7d = {
     value: realizedVol7d != null ? parseFloat(realizedVol7d.toFixed(2)) : null,
     unit: '%',
@@ -232,7 +224,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: realizedVol7d == null ? 'unavailable' : realizedVol7d > 2 && realizedVol7d < 15 ? 'good' : realizedVol7d < 1 ? 'neutral' : 'warn',
   };
 
-  // 5. Autocorrelation (lag-1) — measures if price is trending or mean-reverting
   let autocorrelation = null;
   if (history.length >= 5) {
     const prices = history.map(c => c.p).filter(p => p != null);
@@ -257,7 +248,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
       }
     }
   }
-  // Close to 0 = efficient (good), strong positive = trending, strong negative = mean-reverting
   metrics.autocorrelation = {
     value: autocorrelation != null ? parseFloat(autocorrelation.toFixed(3)) : null,
     unit: 'corr',
@@ -265,7 +255,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: autocorrelation == null ? 'unavailable' : Math.abs(autocorrelation) < 0.2 ? 'good' : Math.abs(autocorrelation) < 0.5 ? 'neutral' : 'warn',
   };
 
-  // 6. Price efficiency — composite: low autocorrelation + moderate volatility = efficient
   let priceEfficiency = null;
   const autocorrScore = metrics.autocorrelation.score;
   const volScore = metrics.realizedVol7d.score;
@@ -279,7 +268,6 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     signal: priceEfficiency == null ? 'unavailable' : priceEfficiency >= 7 ? 'good' : priceEfficiency >= 4 ? 'neutral' : 'bad',
   };
 
-  // Pillar score
   const scorableMetrics = ['realizedVol7d', 'autocorrelation', 'priceEfficiency'];
   const scores = scorableMetrics.map(k => metrics[k]?.score).filter(s => s != null);
   const pillarScore = scores.length > 0
@@ -291,6 +279,152 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
     confidence: scores.length >= 3 ? 'high' : scores.length >= 2 ? 'medium' : 'low',
     metricsComputed: scores.length,
     metricsTotal: 6,
+    metrics,
+  };
+}
+
+// ─── PARTICIPATION PILLAR ────────────────────────────────────
+
+function computeParticipationMetrics(holders) {
+  const metrics = {};
+
+  // Flatten all holders from both sides into one list of position sizes
+  let allPositions = [];
+
+  if (holders && Array.isArray(holders)) {
+    for (const side of holders) {
+      if (side.holders && Array.isArray(side.holders)) {
+        for (const h of side.holders) {
+          allPositions.push(parseFloat(h.amount || 0));
+        }
+      }
+    }
+  }
+
+  // If holders came as a flat structure with .token and .holders
+  if (allPositions.length === 0 && holders && typeof holders === 'object') {
+    // Try iterating holders as an object with token keys
+    const values = Object.values(holders);
+    for (const side of values) {
+      if (Array.isArray(side)) {
+        for (const h of side) {
+          if (h.amount != null) {
+            allPositions.push(parseFloat(h.amount));
+          }
+        }
+      }
+    }
+  }
+
+  const totalPositions = allPositions.length;
+
+  // Sort descending for concentration metrics
+  const sorted = [...allPositions].sort((a, b) => b - a);
+  const totalAmount = sorted.reduce((a, b) => a + b, 0);
+
+  // 1. Unique wallets
+  metrics.uniqueWallets = {
+    value: totalPositions,
+    unit: 'count',
+    score: scoreBetween(totalPositions, 5, 500),
+    signal: totalPositions === 0 ? 'unavailable' : totalPositions > 200 ? 'good' : totalPositions > 50 ? 'neutral' : 'bad',
+  };
+
+  // 2. Top 5 concentration
+  let top5Pct = null;
+  if (totalAmount > 0 && sorted.length >= 5) {
+    const top5Sum = sorted.slice(0, 5).reduce((a, b) => a + b, 0);
+    top5Pct = (top5Sum / totalAmount) * 100;
+  }
+  metrics.top5Concentration = {
+    value: top5Pct != null ? parseFloat(top5Pct.toFixed(1)) : null,
+    unit: '%',
+    score: top5Pct != null ? (11 - scoreBetween(top5Pct, 20, 90)) : null,
+    signal: top5Pct == null ? 'unavailable' : top5Pct < 30 ? 'good' : top5Pct < 60 ? 'neutral' : 'bad',
+  };
+
+  // 3. Top 10 concentration
+  let top10Pct = null;
+  if (totalAmount > 0 && sorted.length >= 10) {
+    const top10Sum = sorted.slice(0, 10).reduce((a, b) => a + b, 0);
+    top10Pct = (top10Sum / totalAmount) * 100;
+  }
+  metrics.top10Concentration = {
+    value: top10Pct != null ? parseFloat(top10Pct.toFixed(1)) : null,
+    unit: '%',
+    score: top10Pct != null ? (11 - scoreBetween(top10Pct, 30, 95)) : null,
+    signal: top10Pct == null ? 'unavailable' : top10Pct < 50 ? 'good' : top10Pct < 75 ? 'neutral' : 'bad',
+  };
+
+  // 4. Gini coefficient
+  let gini = null;
+  if (sorted.length >= 2 && totalAmount > 0) {
+    const n = sorted.length;
+    const sortedAsc = [...allPositions].sort((a, b) => a - b);
+    let sumOfDiffs = 0;
+    for (let i = 0; i < n; i++) {
+      sumOfDiffs += (2 * (i + 1) - n - 1) * sortedAsc[i];
+    }
+    gini = sumOfDiffs / (n * totalAmount);
+    gini = Math.max(0, Math.min(1, gini));
+  }
+  // Lower gini = more equal = better
+  metrics.giniCoefficient = {
+    value: gini != null ? parseFloat(gini.toFixed(3)) : null,
+    unit: 'index',
+    score: gini != null ? (11 - scoreBetween(gini, 0.2, 0.95)) : null,
+    signal: gini == null ? 'unavailable' : gini < 0.4 ? 'good' : gini < 0.7 ? 'neutral' : 'bad',
+  };
+
+  // 5. Whale count (positions > $10K)
+  const whaleThreshold = 10000;
+  const whaleCount = sorted.filter(a => a > whaleThreshold).length;
+  metrics.whaleCount = {
+    value: whaleCount,
+    unit: 'count',
+    score: null,
+    signal: totalPositions === 0 ? 'unavailable' : 'neutral',
+  };
+
+  // 6. Retail ratio (positions < $1K as % of total wallets)
+  const retailThreshold = 1000;
+  const retailCount = allPositions.filter(a => a < retailThreshold).length;
+  const retailRatio = totalPositions > 0 ? (retailCount / totalPositions) * 100 : null;
+  // Higher retail = more distributed = generally better
+  metrics.retailRatio = {
+    value: retailRatio != null ? parseFloat(retailRatio.toFixed(1)) : null,
+    unit: '%',
+    score: scoreBetween(retailRatio, 10, 80),
+    signal: retailRatio == null ? 'unavailable' : retailRatio > 60 ? 'good' : retailRatio > 30 ? 'neutral' : 'bad',
+  };
+
+  // 7. Median position size
+  let medianPosition = null;
+  if (sorted.length > 0) {
+    const mid = Math.floor(sorted.length / 2);
+    medianPosition = sorted.length % 2 !== 0
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  metrics.medianPosition = {
+    value: medianPosition != null ? parseFloat(medianPosition.toFixed(2)) : null,
+    unit: 'USD',
+    score: null,
+    signal: medianPosition == null ? 'unavailable' : 'neutral',
+  };
+
+  // Pillar score from scored metrics
+  const scorableKeys = ['uniqueWallets', 'top5Concentration', 'top10Concentration', 'giniCoefficient', 'retailRatio'];
+  const scores = scorableKeys.map(k => metrics[k]?.score).filter(s => s != null);
+  const pillarScore = scores.length > 0
+    ? parseFloat((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1))
+    : null;
+
+  return {
+    score: pillarScore,
+    confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low',
+    metricsComputed: scores.length,
+    metricsTotal: 7,
     metrics,
   };
 }
@@ -371,12 +505,13 @@ module.exports = async function handler(req, res) {
     // Compute pillars
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades);
     const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d);
+    const participation = computeParticipationMetrics(holders);
 
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
     return res.status(200).json({
       polyscore: null,
-      polyscoreStatus: 'Phase 2 — Liquidity + Discovery pillars live',
+      polyscoreStatus: 'Phase 3 — Liquidity + Discovery + Participation live',
       fetchTime: parseFloat(fetchTime),
 
       market: {
@@ -400,7 +535,7 @@ module.exports = async function handler(req, res) {
         overall: null,
         liquidity: liquidity.score,
         discovery: discovery.score,
-        participation: null,
+        participation: participation.score,
         resolution: null,
         maturity: null,
       },
@@ -408,6 +543,7 @@ module.exports = async function handler(req, res) {
       pillars: {
         liquidity,
         discovery,
+        participation,
       },
 
       rawData: {
@@ -423,7 +559,7 @@ module.exports = async function handler(req, res) {
           daily30d: priceHistory30d ? { points: Array.isArray(priceHistory30d.history) ? priceHistory30d.history.length : Array.isArray(priceHistory30d) ? priceHistory30d.length : 0 } : null,
           hourly24h: priceHistory24h ? { points: Array.isArray(priceHistory24h.history) ? priceHistory24h.history.length : Array.isArray(priceHistory24h) ? priceHistory24h.length : 0 } : null,
         },
-        holders: holders ? { count: Array.isArray(holders) ? holders.length : 0 } : null,
+        holders: holders ? { sides: Array.isArray(holders) ? holders.length : 0, totalHolders: holders.reduce ? holders.reduce((sum, s) => sum + (s.holders ? s.holders.length : 0), 0) : 0 } : null,
         openInterest: openInterest || null,
         marketTrades: marketTrades ? { count: Array.isArray(marketTrades) ? marketTrades.length : 0 } : null,
       },
