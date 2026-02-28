@@ -16,7 +16,7 @@ function scoreCloseTo(value, target, tolerance) {
 
 // ─── LIQUIDITY PILLAR ────────────────────────────────────────
 
-function computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades) {
+function computeLiquidityMetrics(orderbook, spread, midpoint, allTrades) {
   const metrics = {};
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
 
@@ -32,19 +32,27 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades) {
     for (const bid of bids) { const p = parseFloat(bid.price), s = parseFloat(bid.size), d = ((midValue - p) / midValue) * 100; totalBidDepth += p * s; if (d <= 1) bidDepth1 += p * s; if (d <= 5) bidDepth5 += p * s; }
     for (const ask of asks) { const p = parseFloat(ask.price), s = parseFloat(ask.size), d = ((p - midValue) / midValue) * 100; totalAskDepth += p * s; if (d <= 1) askDepth1 += p * s; if (d <= 5) askDepth5 += p * s; }
     depthAt1 = bidDepth1 + askDepth1; depthAt5 = bidDepth5 + askDepth5;
-    const totalDepth = totalBidDepth + totalAskDepth;
-    bookImbalance = totalDepth > 0 ? totalBidDepth / totalDepth : null;
+    bookImbalance = (totalBidDepth + totalAskDepth) > 0 ? totalBidDepth / (totalBidDepth + totalAskDepth) : null;
   }
   metrics.depthAt1Pct = { value: depthAt1 != null ? parseFloat(depthAt1.toFixed(2)) : null, unit: 'USD', score: scoreBetween(depthAt1, 500, 50000), signal: depthAt1 == null ? 'unavailable' : depthAt1 > 20000 ? 'good' : depthAt1 > 2000 ? 'neutral' : 'bad' };
   metrics.depthAt5Pct = { value: depthAt5 != null ? parseFloat(depthAt5.toFixed(2)) : null, unit: 'USD', score: scoreBetween(depthAt5, 2000, 200000), signal: depthAt5 == null ? 'unavailable' : depthAt5 > 50000 ? 'good' : depthAt5 > 10000 ? 'neutral' : 'bad' };
   metrics.bookImbalance = { value: bookImbalance != null ? parseFloat(bookImbalance.toFixed(3)) : null, unit: 'ratio', score: scoreCloseTo(bookImbalance, 0.5, 0.5), signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad' };
 
   let volume24h = null, volume7d = null, volumeTrend = null;
-  if (marketTrades && Array.isArray(marketTrades)) {
-    const now = Date.now() / 1000; let vol24 = 0, vol7d = 0, volPrior7d = 0;
-    for (const trade of marketTrades) { const ts = trade.timestamp || 0, value = parseFloat(trade.size || 0) * parseFloat(trade.price || 0); if (ts >= now - 86400) vol24 += value; if (ts >= now - 86400 * 7) vol7d += value; if (ts >= now - 86400 * 14 && ts < now - 86400 * 7) volPrior7d += value; }
-    volume24h = vol24; volume7d = vol7d;
+  if (allTrades && allTrades.length > 0) {
+    const now = Date.now() / 1000;
+    let vol24 = 0, vol7d = 0, volPrior7d = 0;
+    for (const trade of allTrades) {
+      const ts = trade.timestamp || 0;
+      const value = parseFloat(trade.size || 0) * parseFloat(trade.price || 0);
+      if (ts >= now - 86400) vol24 += value;
+      if (ts >= now - 86400 * 7) vol7d += value;
+      if (ts >= now - 86400 * 14 && ts < now - 86400 * 7) volPrior7d += value;
+    }
+    volume24h = vol24;
+    volume7d = vol7d;
     if (volPrior7d > 0) volumeTrend = ((vol7d - volPrior7d) / volPrior7d) * 100;
+    else if (vol7d > 0) volumeTrend = 100;
   }
   metrics.volume24h = { value: volume24h != null ? parseFloat(volume24h.toFixed(2)) : null, unit: 'USD', score: scoreBetween(volume24h, 1000, 500000), signal: volume24h == null ? 'unavailable' : volume24h > 100000 ? 'good' : volume24h > 10000 ? 'neutral' : 'bad' };
   metrics.volume7d = { value: volume7d != null ? parseFloat(volume7d.toFixed(2)) : null, unit: 'USD', score: scoreBetween(volume7d, 5000, 2000000), signal: volume7d == null ? 'unavailable' : volume7d > 500000 ? 'good' : volume7d > 50000 ? 'neutral' : 'bad' };
@@ -92,16 +100,36 @@ function computeDiscoveryMetrics(midpoint, priceHistory30d) {
 
 // ─── PARTICIPATION PILLAR ────────────────────────────────────
 
-function computeParticipationMetrics(holders) {
+function computeParticipationMetrics(holders, allTrades) {
   const metrics = {};
-  let allPositions = [];
-  if (holders && Array.isArray(holders)) { for (const side of holders) { if (side.holders && Array.isArray(side.holders)) { for (const h of side.holders) allPositions.push(parseFloat(h.amount || 0)); } } }
 
-  const totalPositions = allPositions.length;
+  // Get holder positions from top holders endpoint
+  let allPositions = [];
+  if (holders && Array.isArray(holders)) {
+    for (const side of holders) {
+      if (side.holders && Array.isArray(side.holders)) {
+        for (const h of side.holders) allPositions.push(parseFloat(h.amount || 0));
+      }
+    }
+  }
+
+  // Count unique wallets from trades (much more accurate than top holders)
+  const uniqueWallets = new Set();
+  const tradeSizes = [];
+  if (allTrades && allTrades.length > 0) {
+    for (const trade of allTrades) {
+      if (trade.proxyWallet) uniqueWallets.add(trade.proxyWallet);
+      const size = parseFloat(trade.size || 0) * parseFloat(trade.price || 0);
+      if (size > 0) tradeSizes.push(size);
+    }
+  }
+
+  const walletCount = uniqueWallets.size;
+  metrics.uniqueWallets = { value: walletCount, unit: 'count (from recent trades)', score: scoreBetween(walletCount, 10, 1000), signal: walletCount === 0 ? 'unavailable' : walletCount > 200 ? 'good' : walletCount > 50 ? 'neutral' : 'bad' };
+
+  // Concentration from top holders (still useful)
   const sorted = [...allPositions].sort((a, b) => b - a);
   const totalAmount = sorted.reduce((a, b) => a + b, 0);
-
-  metrics.uniqueWallets = { value: totalPositions, unit: 'count (top holders only)', score: scoreBetween(totalPositions, 5, 500), signal: totalPositions === 0 ? 'unavailable' : totalPositions > 200 ? 'good' : totalPositions > 50 ? 'neutral' : 'bad' };
 
   let top5Pct = null;
   if (totalAmount > 0 && sorted.length >= 5) top5Pct = (sorted.slice(0, 5).reduce((a,b) => a+b, 0) / totalAmount) * 100;
@@ -111,18 +139,27 @@ function computeParticipationMetrics(holders) {
   if (totalAmount > 0 && sorted.length >= 10) top10Pct = (sorted.slice(0, 10).reduce((a,b) => a+b, 0) / totalAmount) * 100;
   metrics.top10Concentration = { value: top10Pct != null ? parseFloat(top10Pct.toFixed(1)) : null, unit: '%', score: top10Pct != null ? (11 - scoreBetween(top10Pct, 30, 95)) : null, signal: top10Pct == null ? 'unavailable' : top10Pct < 50 ? 'good' : top10Pct < 75 ? 'neutral' : 'bad' };
 
+  // Gini from top holders
   let gini = null;
   if (sorted.length >= 2 && totalAmount > 0) { const n = sorted.length; const asc = [...allPositions].sort((a,b) => a-b); let s = 0; for (let i = 0; i < n; i++) s += (2*(i+1) - n - 1) * asc[i]; gini = Math.max(0, Math.min(1, s / (n * totalAmount))); }
   metrics.giniCoefficient = { value: gini != null ? parseFloat(gini.toFixed(3)) : null, unit: 'index', score: gini != null ? (11 - scoreBetween(gini, 0.2, 0.95)) : null, signal: gini == null ? 'unavailable' : gini < 0.4 ? 'good' : gini < 0.7 ? 'neutral' : 'bad' };
 
-  metrics.whaleCount = { value: sorted.filter(a => a > 10000).length, unit: 'count', score: null, signal: totalPositions === 0 ? 'unavailable' : 'neutral' };
+  // Whale and retail from trade sizes (more representative than top holders)
+  const whaleCount = tradeSizes.filter(s => s > 10000).length;
+  const retailCount = tradeSizes.filter(s => s < 100).length;
+  const retailRatio = tradeSizes.length > 0 ? (retailCount / tradeSizes.length) * 100 : null;
 
-  const retailRatio = totalPositions > 0 ? (allPositions.filter(a => a < 1000).length / totalPositions) * 100 : null;
-  metrics.retailRatio = { value: retailRatio != null ? parseFloat(retailRatio.toFixed(1)) : null, unit: '% (top holders only)', score: scoreBetween(retailRatio, 10, 80), signal: retailRatio == null ? 'unavailable' : retailRatio > 60 ? 'good' : retailRatio > 30 ? 'neutral' : 'bad' };
+  metrics.whaleCount = { value: whaleCount, unit: 'trades > $10K', score: null, signal: tradeSizes.length === 0 ? 'unavailable' : 'neutral' };
+  metrics.retailRatio = { value: retailRatio != null ? parseFloat(retailRatio.toFixed(1)) : null, unit: '% of trades < $100', score: scoreBetween(retailRatio, 5, 70), signal: retailRatio == null ? 'unavailable' : retailRatio > 50 ? 'good' : retailRatio > 20 ? 'neutral' : 'bad' };
 
-  let medianPosition = null;
-  if (sorted.length > 0) { const mid = Math.floor(sorted.length / 2); medianPosition = sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2; }
-  metrics.medianPosition = { value: medianPosition != null ? parseFloat(medianPosition.toFixed(2)) : null, unit: 'USD', score: null, signal: medianPosition == null ? 'unavailable' : 'neutral' };
+  // Median trade size
+  let medianTrade = null;
+  if (tradeSizes.length > 0) {
+    const sortedTrades = [...tradeSizes].sort((a, b) => a - b);
+    const mid = Math.floor(sortedTrades.length / 2);
+    medianTrade = sortedTrades.length % 2 !== 0 ? sortedTrades[mid] : (sortedTrades[mid-1] + sortedTrades[mid]) / 2;
+  }
+  metrics.medianTradeSize = { value: medianTrade != null ? parseFloat(medianTrade.toFixed(2)) : null, unit: 'USD', score: null, signal: medianTrade == null ? 'unavailable' : 'neutral' };
 
   const scorable = ['uniqueWallets', 'top5Concentration', 'top10Concentration', 'giniCoefficient', 'retailRatio'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
@@ -131,7 +168,7 @@ function computeParticipationMetrics(holders) {
 
 // ─── MATURITY PILLAR ─────────────────────────────────────────
 
-function computeMaturityMetrics(gammaMarket, priceHistory30d, marketTrades) {
+function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades) {
   const metrics = {};
   const now = new Date();
 
@@ -157,7 +194,13 @@ function computeMaturityMetrics(gammaMarket, priceHistory30d, marketTrades) {
   metrics.priceStability = { value: priceStability != null ? parseFloat(priceStability.toFixed(4)) : null, unit: 'σ', score: priceStability != null ? (11 - scoreBetween(priceStability, 0.01, 0.3)) : null, signal: priceStability == null ? 'unavailable' : priceStability < 0.05 ? 'good' : priceStability < 0.15 ? 'neutral' : 'bad' };
 
   let activityTrend = null;
-  if (marketTrades && Array.isArray(marketTrades) && marketTrades.length > 0) { const nowSec = Date.now() / 1000; const recent = marketTrades.filter(t => (t.timestamp||0) >= nowSec - 86400*7).length; const older = marketTrades.filter(t => { const ts = t.timestamp||0; return ts >= nowSec - 86400*14 && ts < nowSec - 86400*7; }).length; if (older > 0) activityTrend = recent / older; else if (recent > 0) activityTrend = 2.0; }
+  if (allTrades && allTrades.length > 0) {
+    const nowSec = Date.now() / 1000;
+    const recent = allTrades.filter(t => (t.timestamp||0) >= nowSec - 86400*7).length;
+    const older = allTrades.filter(t => { const ts = t.timestamp||0; return ts >= nowSec - 86400*14 && ts < nowSec - 86400*7; }).length;
+    if (older > 0) activityTrend = recent / older;
+    else if (recent > 0) activityTrend = 2.0;
+  }
   metrics.activityTrend = { value: activityTrend != null ? parseFloat(activityTrend.toFixed(2)) : null, unit: 'ratio', score: activityTrend != null ? scoreBetween(activityTrend, 0.2, 3) : null, signal: activityTrend == null ? 'unavailable' : activityTrend > 1.2 ? 'good' : activityTrend > 0.5 ? 'neutral' : 'bad' };
 
   const totalVolume = parseFloat(gammaMarket.volume || 0);
@@ -174,109 +217,41 @@ function computeResolutionMetrics(gammaMarket, openInterest) {
   const metrics = {};
   const desc = gammaMarket.description || '';
 
-  // 1. Has resolution source
   const resSource = gammaMarket.resolutionSource || null;
   const hasResSource = resSource != null && resSource.length > 0;
-  metrics.resolutionSource = {
-    value: hasResSource ? resSource : 'Not specified',
-    unit: 'source',
-    score: hasResSource ? 8 : 2,
-    signal: hasResSource ? 'good' : 'bad',
-  };
+  metrics.resolutionSource = { value: hasResSource ? resSource : 'Not specified', unit: 'source', score: hasResSource ? 8 : 2, signal: hasResSource ? 'good' : 'bad' };
 
-  // 2. Description quality — longer, more detailed descriptions = better
   const descLength = desc.length;
-  metrics.descriptionLength = {
-    value: descLength,
-    unit: 'chars',
-    score: scoreBetween(descLength, 50, 1000),
-    signal: descLength > 500 ? 'good' : descLength > 200 ? 'neutral' : 'bad',
-  };
+  metrics.descriptionLength = { value: descLength, unit: 'chars', score: scoreBetween(descLength, 50, 1000), signal: descLength > 500 ? 'good' : descLength > 200 ? 'neutral' : 'bad' };
 
-  // 3. Contract detail score — count resolution-related keywords
-  const resolutionKeywords = [
-    'resolve', 'resolution', 'will resolve to',
-    'yes if', 'no if',
-    'otherwise',
-    'source', 'oracle', 'official',
-    'deadline', 'by', 'before', 'after',
-    'criteria', 'qualify', 'does not qualify',
-    'consensus', 'reporting', 'announced',
-    'defined as', 'means', 'specifically',
-    'edge case', 'exception', 'excluding', 'including',
-    'AM ET', 'PM ET', 'UTC', 'EST',
-  ];
+  const resolutionKeywords = ['resolve', 'resolution', 'will resolve to', 'yes if', 'no if', 'otherwise', 'source', 'oracle', 'official', 'deadline', 'by', 'before', 'after', 'criteria', 'qualify', 'does not qualify', 'consensus', 'reporting', 'announced', 'defined as', 'means', 'specifically', 'edge case', 'exception', 'excluding', 'including', 'AM ET', 'PM ET', 'UTC', 'EST'];
   const lowerDesc = desc.toLowerCase();
   let keywordHits = 0;
-  for (const kw of resolutionKeywords) {
-    if (lowerDesc.includes(kw.toLowerCase())) keywordHits++;
-  }
-  const keywordRatio = resolutionKeywords.length > 0 ? (keywordHits / resolutionKeywords.length) * 100 : 0;
-  metrics.contractDetailScore = {
-    value: keywordHits,
-    unit: `of ${resolutionKeywords.length} key terms found`,
-    score: scoreBetween(keywordHits, 2, 15),
-    signal: keywordHits >= 10 ? 'good' : keywordHits >= 5 ? 'neutral' : 'bad',
-  };
+  for (const kw of resolutionKeywords) { if (lowerDesc.includes(kw.toLowerCase())) keywordHits++; }
+  metrics.contractDetailScore = { value: keywordHits, unit: `of ${resolutionKeywords.length} key terms found`, score: scoreBetween(keywordHits, 2, 15), signal: keywordHits >= 10 ? 'good' : keywordHits >= 5 ? 'neutral' : 'bad' };
 
-  // 4. Has end date
   const hasEndDate = gammaMarket.endDate != null;
-  metrics.hasEndDate = {
-    value: hasEndDate,
-    unit: 'boolean',
-    score: hasEndDate ? 8 : 3,
-    signal: hasEndDate ? 'good' : 'warn',
-  };
+  metrics.hasEndDate = { value: hasEndDate, unit: 'boolean', score: hasEndDate ? 8 : 3, signal: hasEndDate ? 'good' : 'warn' };
 
-  // 5. Resolution type
   const outcomes = gammaMarket.outcomes ? JSON.parse(gammaMarket.outcomes) : [];
   const resType = outcomes.length <= 2 ? 'binary' : 'multi-outcome';
-  metrics.resolutionType = {
-    value: resType,
-    unit: 'type',
-    score: resType === 'binary' ? 8 : 6,
-    signal: 'neutral',
-  };
+  metrics.resolutionType = { value: resType, unit: 'type', score: resType === 'binary' ? 8 : 6, signal: 'neutral' };
 
-  // 6. Open interest
+  // Open interest from /oi endpoint
   let oiValue = null;
-  if (openInterest != null) {
-    if (typeof openInterest === 'number') oiValue = openInterest;
-    else if (openInterest.openInterest != null) oiValue = parseFloat(openInterest.openInterest);
-    else if (openInterest.oi != null) oiValue = parseFloat(openInterest.oi);
+  if (openInterest && Array.isArray(openInterest) && openInterest.length > 0) {
+    oiValue = openInterest[0].value != null ? parseFloat(openInterest[0].value) : null;
   }
-  metrics.openInterest = {
-    value: oiValue,
-    unit: 'USD',
-    score: oiValue != null ? scoreBetween(oiValue, 5000, 2000000) : null,
-    signal: oiValue == null ? 'unavailable' : oiValue > 500000 ? 'good' : oiValue > 50000 ? 'neutral' : 'bad',
-  };
+  metrics.openInterest = { value: oiValue != null ? parseFloat(oiValue.toFixed(2)) : null, unit: 'USD', score: oiValue != null ? scoreBetween(oiValue, 5000, 2000000) : null, signal: oiValue == null ? 'unavailable' : oiValue > 500000 ? 'good' : oiValue > 50000 ? 'neutral' : 'bad' };
 
-  // 7. Days to resolution (risk of near-term resolution)
   const endDate = gammaMarket.endDate;
   let daysLeft = null;
-  if (endDate) {
-    daysLeft = Math.floor((new Date(endDate) - new Date()) / (1000 * 60 * 60 * 24));
-    if (daysLeft < 0) daysLeft = 0;
-  }
-  // More time = less resolution pressure risk
-  metrics.resolutionTimeRisk = {
-    value: daysLeft,
-    unit: 'days remaining',
-    score: daysLeft != null ? scoreBetween(daysLeft, 1, 180) : null,
-    signal: daysLeft == null ? 'unavailable' : daysLeft > 60 ? 'good' : daysLeft > 14 ? 'neutral' : 'warn',
-  };
+  if (endDate) { daysLeft = Math.floor((new Date(endDate) - new Date()) / (1000 * 60 * 60 * 24)); if (daysLeft < 0) daysLeft = 0; }
+  metrics.resolutionTimeRisk = { value: daysLeft, unit: 'days remaining', score: daysLeft != null ? scoreBetween(daysLeft, 1, 180) : null, signal: daysLeft == null ? 'unavailable' : daysLeft > 60 ? 'good' : daysLeft > 14 ? 'neutral' : 'warn' };
 
-  const scorable = ['resolutionSource', 'descriptionLength', 'contractDetailScore', 'hasEndDate', 'resolutionType', 'resolutionTimeRisk'];
+  const scorable = ['resolutionSource', 'descriptionLength', 'contractDetailScore', 'hasEndDate', 'resolutionType', 'openInterest', 'resolutionTimeRisk'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  return {
-    score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null,
-    confidence: scores.length >= 5 ? 'high' : scores.length >= 3 ? 'medium' : 'low',
-    metricsComputed: scores.length,
-    metricsTotal: 7,
-    llmAnalysis: 'Not yet enabled — Claude API integration coming soon',
-    metrics,
-  };
+  return { score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null, confidence: scores.length >= 5 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 7, llmAnalysis: 'Not yet enabled — Claude API integration coming soon', metrics };
 }
 
 // ─── COMPOSITE POLYSCORE ─────────────────────────────────────
@@ -284,17 +259,8 @@ function computeResolutionMetrics(gammaMarket, openInterest) {
 function computePolyScore(liquidity, discovery, participation, maturity, resolution) {
   const weights = { liquidity: 0.25, discovery: 0.15, participation: 0.20, maturity: 0.15, resolution: 0.25 };
   const pillarScores = { liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score };
-
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  for (const [key, weight] of Object.entries(weights)) {
-    if (pillarScores[key] != null) {
-      weightedSum += pillarScores[key] * weight;
-      totalWeight += weight;
-    }
-  }
-
+  let weightedSum = 0, totalWeight = 0;
+  for (const [key, weight] of Object.entries(weights)) { if (pillarScores[key] != null) { weightedSum += pillarScores[key] * weight; totalWeight += weight; } }
   if (totalWeight === 0) return null;
   return parseFloat((weightedSum / totalWeight).toFixed(1));
 }
@@ -305,14 +271,10 @@ module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'GET only', status: 405 } });
-  }
+  if (req.method !== 'GET') return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'GET only', status: 405 } });
 
   const { slug } = req.query;
-  if (!slug) {
-    return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Provide a market slug.', status: 400 } });
-  }
+  if (!slug) return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Provide a market slug.', status: 400 } });
 
   const marketSlug = slug.trim().toLowerCase();
 
@@ -320,58 +282,59 @@ module.exports = async function handler(req, res) {
     const gammaRes = await fetch(`https://gamma-api.polymarket.com/markets?slug=${encodeURIComponent(marketSlug)}`);
     if (!gammaRes.ok) throw new Error(`GAMMA API failed: ${gammaRes.status}`);
     const markets = await gammaRes.json();
-
-    if (!markets || markets.length === 0) {
-      return res.status(404).json({ error: { code: 'MARKET_NOT_FOUND', message: `No market found with slug '${marketSlug}'`, status: 404 } });
-    }
+    if (!markets || markets.length === 0) return res.status(404).json({ error: { code: 'MARKET_NOT_FOUND', message: `No market found with slug '${marketSlug}'`, status: 404 } });
 
     const market = markets[0];
     const clobTokenIds = market.clobTokenIds ? JSON.parse(market.clobTokenIds) : [];
     const conditionId = market.conditionId;
     const primaryTokenId = clobTokenIds[0];
     const secondaryTokenId = clobTokenIds[1];
-
-    if (!primaryTokenId) {
-      return res.status(400).json({ error: { code: 'NO_TOKEN_IDS', message: 'No CLOB token IDs.', status: 400 } });
-    }
+    if (!primaryTokenId) return res.status(400).json({ error: { code: 'NO_TOKEN_IDS', message: 'No CLOB token IDs.', status: 400 } });
 
     const startTime = Date.now();
 
+    // Fetch all data in parallel — including 2 batches of trades and the correct OI endpoint
     const results = await Promise.allSettled([
       fetch(`https://clob.polymarket.com/book?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
       fetch(`https://clob.polymarket.com/spread?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
       fetch(`https://clob.polymarket.com/midpoint?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
       fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1d&fidelity=30`).then(r => r.ok ? r.json() : null),
       fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1h&fidelity=24`).then(r => r.ok ? r.json() : null),
-      fetch(`https://clob.polymarket.com/trades?market=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
       fetch(`https://data-api.polymarket.com/holders?market=${conditionId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/open-interest?market=${conditionId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/trades?market=${conditionId}`).then(r => r.ok ? r.json() : null),
+      fetch(`https://data-api.polymarket.com/oi?market=${conditionId}`).then(r => r.ok ? r.json() : null),
+      fetch(`https://data-api.polymarket.com/trades?market=${conditionId}&limit=1000&offset=0`).then(r => r.ok ? r.json() : null),
+      fetch(`https://data-api.polymarket.com/trades?market=${conditionId}&limit=1000&offset=1000`).then(r => r.ok ? r.json() : null),
     ]);
 
     const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
     const get = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
 
     const orderbook = get(0), spread = get(1), midpoint = get(2);
-    const priceHistory30d = get(3), priceHistory24h = get(4), trades = get(5);
-    const holders = get(6), openInterest = get(7), marketTrades = get(8);
+    const priceHistory30d = get(3), priceHistory24h = get(4);
+    const holders = get(5), openInterest = get(6);
+    const trades1 = get(7), trades2 = get(8);
+
+    // Merge trade batches
+    const allTrades = [
+      ...(Array.isArray(trades1) ? trades1 : []),
+      ...(Array.isArray(trades2) ? trades2 : []),
+    ];
 
     // Compute all 5 pillars
-    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades);
+    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, allTrades);
     const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d);
-    const participation = computeParticipationMetrics(holders);
-    const maturity = computeMaturityMetrics(market, priceHistory30d, marketTrades);
+    const participation = computeParticipationMetrics(holders, allTrades);
+    const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades);
     const resolution = computeResolutionMetrics(market, openInterest);
 
-    // Compute composite
     const polyscore = computePolyScore(liquidity, discovery, participation, maturity, resolution);
-
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
     return res.status(200).json({
       polyscore,
       polyscoreStatus: polyscore != null ? 'All 5 pillars computed' : 'Partial — some pillars unavailable',
       fetchTime: parseFloat(fetchTime),
+      tradesSampled: allTrades.length,
 
       market: {
         title: market.question,
@@ -390,15 +353,7 @@ module.exports = async function handler(req, res) {
         tokenIds: { yes: primaryTokenId, no: secondaryTokenId || null },
       },
 
-      scores: {
-        overall: polyscore,
-        liquidity: liquidity.score,
-        discovery: discovery.score,
-        participation: participation.score,
-        maturity: maturity.score,
-        resolution: resolution.score,
-      },
-
+      scores: { overall: polyscore, liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score },
       pillars: { liquidity, discovery, participation, maturity, resolution },
 
       rawData: {
@@ -406,9 +361,9 @@ module.exports = async function handler(req, res) {
         spread: spread || null,
         midpoint: midpoint || null,
         priceHistory: { daily30d: priceHistory30d ? { points: Array.isArray(priceHistory30d.history) ? priceHistory30d.history.length : Array.isArray(priceHistory30d) ? priceHistory30d.length : 0 } : null, hourly24h: priceHistory24h ? { points: Array.isArray(priceHistory24h.history) ? priceHistory24h.history.length : Array.isArray(priceHistory24h) ? priceHistory24h.length : 0 } : null },
-        holders: holders ? { sides: Array.isArray(holders) ? holders.length : 0, totalHolders: Array.isArray(holders) ? holders.reduce((sum, s) => sum + (s.holders ? s.holders.length : 0), 0) : 0 } : null,
+        holders: holders ? { sides: Array.isArray(holders) ? holders.length : 0, totalTopHolders: Array.isArray(holders) ? holders.reduce((sum, s) => sum + (s.holders ? s.holders.length : 0), 0) : 0 } : null,
         openInterest: openInterest || null,
-        marketTrades: marketTrades ? { count: Array.isArray(marketTrades) ? marketTrades.length : 0 } : null,
+        trades: { sampled: allTrades.length, batch1: Array.isArray(trades1) ? trades1.length : 0, batch2: Array.isArray(trades2) ? trades2.length : 0 },
       },
     });
 
