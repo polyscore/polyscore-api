@@ -79,7 +79,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, allTrades) {
       slippage5k = ((avgPrice - midValue) / midValue) * 100;
     }
   }
-  metrics.slippage5k = { value: fmt(slippage5k, 2), unit: '%', score: slippage5k != null ? (11 - scoreBetween(slippage5k, 0.5, 15)) : null, signal: slippage5k == null ? 'unavailable' : slippage5k < 1 ? 'good' : slippage5k < 5 ? 'neutral' : 'bad', context: slippage5k == null ? null : slippage5k < 1 ? 'Minimal impact' : slippage5k < 5 ? 'Moderate slippage' : 'Heavy slippage — use limit orders' };
+  metrics.slippage5k = { value: fmt(slippage5k, 2), unit: '%', score: slippage5k != null ? (11 - scoreBetween(slippage5k, 0.5, 10)) : null, signal: slippage5k == null ? 'unavailable' : slippage5k < 1 ? 'good' : slippage5k < 5 ? 'neutral' : 'bad', context: slippage5k == null ? null : slippage5k < 1 ? 'Minimal impact' : slippage5k < 5 ? 'Moderate slippage' : 'Heavy slippage — use limit orders' };
 
   // 5. Amihud Illiquidity Ratio — avg(|daily return| / daily volume)
   let amihud = null;
