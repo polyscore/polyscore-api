@@ -16,7 +16,7 @@ function scoreCloseTo(value, target, tolerance) {
 
 // ─── LIQUIDITY PILLAR ────────────────────────────────────────
 
-function computeLiquidityMetrics(orderbook, spread, midpoint, trades) {
+function computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades) {
   const metrics = {};
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
 
@@ -89,12 +89,12 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, trades) {
     signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad',
   };
 
-  // 5, 6, 7. Volume from trades
+  // 5, 6, 7. Volume from DATA API trades
   let volume24h = null;
   let volume7d = null;
   let volumeTrend = null;
 
-  if (trades && Array.isArray(trades)) {
+  if (marketTrades && Array.isArray(marketTrades)) {
     const now = Date.now() / 1000;
     const oneDayAgo = now - 86400;
     const sevenDaysAgo = now - 86400 * 7;
@@ -102,10 +102,10 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, trades) {
 
     let vol24 = 0, vol7d = 0, volPrior7d = 0;
 
-    for (const trade of trades) {
-      const ts = trade.timestamp || trade.t || 0;
-      const size = parseFloat(trade.size || trade.amount || trade.makerAmountFilled || 0);
-      const price = parseFloat(trade.price || trade.p || 0);
+    for (const trade of marketTrades) {
+      const ts = trade.timestamp || 0;
+      const size = parseFloat(trade.size || 0);
+      const price = parseFloat(trade.price || 0);
       const value = size * price;
 
       if (ts >= oneDayAgo) vol24 += value;
@@ -229,8 +229,8 @@ module.exports = async function handler(req, res) {
     const openInterest = get(7);
     const marketTrades = get(8);
 
-    // Compute Liquidity pillar
-    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, trades);
+    // Compute Liquidity pillar using DATA API trades for volume
+    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, marketTrades);
 
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
