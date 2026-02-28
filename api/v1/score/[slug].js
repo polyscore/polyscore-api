@@ -1,8 +1,9 @@
-const { parseMarketInput } = require('../../../lib/parseMarketInput');
+const path = require('path');
+const { parseMarketInput } = require(path.join(process.cwd(), 'lib', 'parseMarketInput'));
 const {
   fetchMarketBySlug,
   fetchAllMarketData,
-} = require('../../../lib/polymarket');
+} = require(path.join(process.cwd(), 'lib', 'polymarket'));
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
