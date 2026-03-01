@@ -33,47 +33,34 @@ module.exports = async function handler(req, res) {
       };
     }
 
-function sortMarkets(markets) {
-  if (markets.length <= 1) return markets;
-
-  const thresholds = markets.map(m => (m.groupItemThreshold || '').toString());
-  const allNumeric = thresholds.every(t => /^\d+\+?$/.test(t));
-  const uniqueThresholds = new Set(thresholds);
-  const isNumericSequence = allNumeric && uniqueThresholds.size > 1;
-
-  if (isNumericSequence) {
-    return markets.sort((a, b) =>
-      parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold)
-    );
-  }
-
-  return markets.sort((a, b) => {
-    let aPrice = 0, bPrice = 0;
-    try {
-      const aOp = typeof a.outcomePrices === 'string' ? JSON.parse(a.outcomePrices) : a.outcomePrices;
-      aPrice = parseFloat(aOp[0] || 0);
-    } catch(e) {}
-    try {
-      const bOp = typeof b.outcomePrices === 'string' ? JSON.parse(b.outcomePrices) : b.outcomePrices;
-      bPrice = parseFloat(bOp[0] || 0);
-    } catch(e) {}
-    return bPrice - aPrice;
-  });
-}
-
-      // Text-based or same-threshold: sort by YES price descending
-      return markets.sort((a, b) => {
-        let aPrice = 0, bPrice = 0;
-        try { aPrice = parseFloat(JSON.parse(a.outcomePrices || '[]')[0] || 0); } catch(e) {}
-        try { bPrice = parseFloat(JSON.parse(b.outcomePrices || '[]')[0] || 0); } catch(e) {}
+    function sortMarkets(markets) {
+      if (markets.length <= 1) return markets;
+      var thresholds = markets.map(function(m) { return (m.groupItemThreshold || '').toString(); });
+      var allNumeric = thresholds.every(function(t) { return /^\d+\+?$/.test(t); });
+      var uniqueCount = new Set(thresholds).size;
+      if (allNumeric && uniqueCount > 1) {
+        return markets.sort(function(a, b) {
+          return parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold);
+        });
+      }
+      return markets.sort(function(a, b) {
+        var aPrice = 0, bPrice = 0;
+        try {
+          var aOp = typeof a.outcomePrices === 'string' ? JSON.parse(a.outcomePrices) : (a.outcomePrices || []);
+          aPrice = parseFloat(aOp[0] || 0);
+        } catch(e) {}
+        try {
+          var bOp = typeof b.outcomePrices === 'string' ? JSON.parse(b.outcomePrices) : (b.outcomePrices || []);
+          bPrice = parseFloat(bOp[0] || 0);
+        } catch(e) {}
         return bPrice - aPrice;
       });
     }
 
     function formatEvent(event) {
-      const activeMarkets = (event.markets || []).filter(m => m.active && !m.closed);
-      const sorted = sortMarkets(activeMarkets);
-      const markets = sorted.map(formatMarket);
+      var activeMarkets = (event.markets || []).filter(function(m) { return m.active && !m.closed; });
+      var sorted = sortMarkets(activeMarkets);
+      var markets = sorted.map(formatMarket);
       return {
         id: event.id,
         title: event.title,
@@ -89,11 +76,11 @@ function sortMarkets(markets) {
       };
     }
 
-    const looksLikeSlug = /^[a-z0-9-]+$/.test(query) && query.includes('-');
+    var looksLikeSlug = /^[a-z0-9-]+$/.test(query) && query.includes('-');
     if (looksLikeSlug) {
-      const eventRes = await fetch(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(query)}`);
+      var eventRes = await fetch('https://gamma-api.polymarket.com/events/slug/' + encodeURIComponent(query));
       if (eventRes.ok) {
-        const event = await eventRes.json();
+        var event = await eventRes.json();
         if (event && event.id && event.active && !event.closed) {
           return res.status(200).json({
             query: q,
@@ -104,13 +91,13 @@ function sortMarkets(markets) {
       }
     }
 
-    const gammaRes = await fetch(
-      `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(query)}`
+    var gammaRes = await fetch(
+      'https://gamma-api.polymarket.com/public-search?q=' + encodeURIComponent(query)
     );
-    if (!gammaRes.ok) throw new Error(`GAMMA search failed: ${gammaRes.status}`);
-    const data = await gammaRes.json();
-    const events = (data.events || [])
-      .filter(e => e.active && !e.closed)
+    if (!gammaRes.ok) throw new Error('GAMMA search failed: ' + gammaRes.status);
+    var data = await gammaRes.json();
+    var events = (data.events || [])
+      .filter(function(e) { return e.active && !e.closed; })
       .slice(0, 20)
       .map(formatEvent);
 
