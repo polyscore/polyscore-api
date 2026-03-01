@@ -19,10 +19,10 @@ module.exports = async function handler(req, res) {
     const data = await gammaRes.json();
 
     const events = (data.events || [])
-      .filter(e => e.active || e.closed)
+      .filter(e => e.active && !e.closed)
       .slice(0, 20)
       .map(event => {
-        const markets = (event.markets || []).map(m => {
+        const markets = (event.markets || []).filter(m => m.active && !m.closed).map(m => {
           let outcomes = [];
           let outcomePrices = [];
           try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
