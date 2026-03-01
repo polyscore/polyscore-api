@@ -8,9 +8,54 @@ module.exports = async function handler(req, res) {
   if (!q) {
     return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Provide a search query via ?q=', status: 400 } });
   }
+
   try {
+    // Extract slug from Polymarket URLs
+    let query = q;
+    const urlMatch = q.match(/polymarket\.com\/(?:event|market)\/([a-z0-9-]+)/i);
+    if (urlMatch) query = urlMatch[1].split('?')[0];
+
+    // If it looks like a slug (hyphens, no spaces), try direct event lookup first
+    const looksLikeSlug = /^[a-z0-9-]+$/.test(query) && query.includes('-');
+    if (looksLikeSlug) {
+      const eventRes = await fetch(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(query)}`);
+      if (eventRes.ok) {
+        const event = await eventRes.json();
+        if (event && event.id) {
+          const markets = (event.markets || [])
+            .filter(m => m.active && !m.closed)
+            .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
+            .map(m => {
+              let outcomes = [], outcomePrices = [];
+              try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
+              try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
+              return {
+                id: m.id, question: m.question, groupItemTitle: m.groupItemTitle || null,
+                slug: m.slug, conditionId: m.conditionId, active: m.active, closed: m.closed,
+                outcomes, outcomePrices, volume: m.volume || null, liquidity: m.liquidity || null,
+                startDate: m.startDate || null, endDate: m.endDate || null,
+              };
+            });
+          return res.status(200).json({
+            query: q,
+            resultCount: 1,
+            events: [{
+              id: event.id, title: event.title, slug: event.slug,
+              image: event.image || event.icon || null,
+              description: event.description ? event.description.slice(0, 200) + '...' : null,
+              active: event.active, closed: event.closed,
+              volume: event.volume || null, liquidity: event.liquidity || null,
+              startDate: event.startDate || null, endDate: event.endDate || null,
+              marketCount: markets.length, markets,
+            }],
+          });
+        }
+      }
+    }
+
+    // Fallback: regular search
     const gammaRes = await fetch(
-      `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(q)}`
+      `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(query)}`
     );
     if (!gammaRes.ok) throw new Error(`GAMMA search failed: ${gammaRes.status}`);
     const data = await gammaRes.json();
@@ -22,40 +67,24 @@ module.exports = async function handler(req, res) {
           .filter(m => m.active && !m.closed)
           .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
           .map(m => {
-            let outcomes = [];
-            let outcomePrices = [];
+            let outcomes = [], outcomePrices = [];
             try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
             try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
             return {
-              id: m.id,
-              question: m.question,
-              groupItemTitle: m.groupItemTitle || null,
-              slug: m.slug,
-              conditionId: m.conditionId,
-              active: m.active,
-              closed: m.closed,
-              outcomes,
-              outcomePrices,
-              volume: m.volume || null,
-              liquidity: m.liquidity || null,
-              startDate: m.startDate || null,
-              endDate: m.endDate || null,
+              id: m.id, question: m.question, groupItemTitle: m.groupItemTitle || null,
+              slug: m.slug, conditionId: m.conditionId, active: m.active, closed: m.closed,
+              outcomes, outcomePrices, volume: m.volume || null, liquidity: m.liquidity || null,
+              startDate: m.startDate || null, endDate: m.endDate || null,
             };
           });
         return {
-          id: event.id,
-          title: event.title,
-          slug: event.slug,
+          id: event.id, title: event.title, slug: event.slug,
           image: event.image || event.icon || null,
           description: event.description ? event.description.slice(0, 200) + '...' : null,
-          active: event.active,
-          closed: event.closed,
-          volume: event.volume || null,
-          liquidity: event.liquidity || null,
-          startDate: event.startDate || null,
-          endDate: event.endDate || null,
-          marketCount: markets.length,
-          markets,
+          active: event.active, closed: event.closed,
+          volume: event.volume || null, liquidity: event.liquidity || null,
+          startDate: event.startDate || null, endDate: event.endDate || null,
+          marketCount: markets.length, markets,
         };
       });
     return res.status(200).json({
