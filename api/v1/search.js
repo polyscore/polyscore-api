@@ -34,29 +34,36 @@ module.exports = async function handler(req, res) {
     }
 
 function sortMarkets(markets) {
-  if (markets.length <= 1) return markets;
-  var titles = markets.map(function(m) { return (m.groupItemTitle || '').toString(); });
-  var allTitlesNumeric = titles.every(function(t) { return /^\d+\+?$/.test(t); });
-  if (allTitlesNumeric && new Set(titles).size > 1) {
-    return markets.sort(function(a, b) {
-      return parseFloat(a.groupItemTitle) - parseFloat(b.groupItemTitle);
-    });
-  }
-  return markets.sort(function(a, b) {
-    var aPrice = 0, bPrice = 0;
-    var aRaw = a.outcomePrices;
-    var bRaw = b.outcomePrices;
-    try {
-      if (typeof aRaw === 'string') aRaw = JSON.parse(aRaw);
-      if (Array.isArray(aRaw)) aPrice = parseFloat(aRaw[0]) || 0;
-    } catch(e) {}
-    try {
-      if (typeof bRaw === 'string') bRaw = JSON.parse(bRaw);
-      if (Array.isArray(bRaw)) bPrice = parseFloat(bRaw[0]) || 0;
-    } catch(e) {}
-    return bPrice - aPrice;
-  });
-}
+      if (markets.length <= 1) return markets;
+      var leadingNums = markets.map(function(m) {
+        var title = (m.groupItemTitle || '').toString();
+        var match = title.match(/^(\d+)/);
+        return match ? parseFloat(match[1]) : null;
+      });
+      var allHaveLeadingNum = leadingNums.every(function(n) { return n !== null; });
+      var uniqueNums = new Set(leadingNums.filter(function(n) { return n !== null; }));
+      if (allHaveLeadingNum && uniqueNums.size > 1) {
+        return markets.sort(function(a, b) {
+          var aMatch = a.groupItemTitle.match(/^(\d+)/);
+          var bMatch = b.groupItemTitle.match(/^(\d+)/);
+          return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
+        });
+      }
+      return markets.sort(function(a, b) {
+        var aPrice = 0, bPrice = 0;
+        var aRaw = a.outcomePrices;
+        var bRaw = b.outcomePrices;
+        try {
+          if (typeof aRaw === 'string') aRaw = JSON.parse(aRaw);
+          if (Array.isArray(aRaw)) aPrice = parseFloat(aRaw[0]) || 0;
+        } catch(e) {}
+        try {
+          if (typeof bRaw === 'string') bRaw = JSON.parse(bRaw);
+          if (Array.isArray(bRaw)) bPrice = parseFloat(bRaw[0]) || 0;
+        } catch(e) {}
+        return bPrice - aPrice;
+      });
+    }
 
     function formatEvent(event) {
       var activeMarkets = (event.markets || []).filter(function(m) { return m.active && !m.closed; });
