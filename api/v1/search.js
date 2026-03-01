@@ -18,49 +18,30 @@ module.exports = async function handler(req, res) {
     if (!gammaRes.ok) throw new Error(`GAMMA search failed: ${gammaRes.status}`);
     const data = await gammaRes.json();
 
-    const markets = (event.markets || [])
+const markets = (event.markets || [])
   .filter(m => m.active && !m.closed)
   .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
   .map(m => {
-        const markets = (event.markets || []).filter(m => m.active && !m.closed).map(m => {
-          let outcomes = [];
-          let outcomePrices = [];
-          try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
-          try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
-
-          return {
-  id: m.id,
-  question: m.question,
-  groupItemTitle: m.groupItemTitle || null,
-  slug: m.slug,
-  conditionId: m.conditionId,
-  active: m.active,
-  closed: m.closed,
-  outcomes,
-  outcomePrices,
-  volume: m.volume || null,
-  liquidity: m.liquidity || null,
-  startDate: m.startDate || null,
-  endDate: m.endDate || null,
-};
-        });
-
-        return {
-          id: event.id,
-          title: event.title,
-          slug: event.slug,
-          image: event.image || event.icon || null,
-          description: event.description ? event.description.slice(0, 200) + '...' : null,
-          active: event.active,
-          closed: event.closed,
-          volume: event.volume || null,
-          liquidity: event.liquidity || null,
-          startDate: event.startDate || null,
-          endDate: event.endDate || null,
-          marketCount: markets.length,
-          markets,
-        };
-      });
+    let outcomes = [];
+    let outcomePrices = [];
+    try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
+    try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
+    return {
+      id: m.id,
+      question: m.question,
+      groupItemTitle: m.groupItemTitle || null,
+      slug: m.slug,
+      conditionId: m.conditionId,
+      active: m.active,
+      closed: m.closed,
+      outcomes,
+      outcomePrices,
+      volume: m.volume || null,
+      liquidity: m.liquidity || null,
+      startDate: m.startDate || null,
+      endDate: m.endDate || null,
+    };
+  });
 
     return res.status(200).json({
       query: q,
