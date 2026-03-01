@@ -364,45 +364,85 @@ function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades) {
 
 // ─── RESOLUTION PILLAR ───────────────────────────────────────
 
-function computeResolutionMetrics(gammaMarket, openInterest) {
+function computeResolutionMetrics(gammaMarket, openInterest, holders) {
   const metrics = {};
+  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
   const desc = gammaMarket.description || '';
 
+  // 1. Resolution Source
   const resSource = gammaMarket.resolutionSource || null;
   const hasResSource = resSource != null && resSource.length > 0;
-  metrics.resolutionSource = { value: hasResSource ? resSource : 'Not specified', unit: 'source', score: hasResSource ? 8 : 2, signal: hasResSource ? 'good' : 'bad' };
+  let sourceQuality = 'none';
+  if (hasResSource) {
+    const lower = resSource.toLowerCase();
+    if (lower.includes('ap news') || lower.includes('reuters') || lower.includes('.gov') || lower.includes('official')) sourceQuality = 'authoritative';
+    else if (lower.includes('http') || lower.includes('www')) sourceQuality = 'semi-authoritative';
+    else sourceQuality = 'subjective';
+  }
+  metrics.resolutionSource = { value: hasResSource ? resSource : 'Not specified', unit: 'source', score: hasResSource ? (sourceQuality === 'authoritative' ? 10 : sourceQuality === 'semi-authoritative' ? 7 : 5) : 2, signal: !hasResSource ? 'bad' : sourceQuality === 'authoritative' ? 'good' : sourceQuality === 'semi-authoritative' ? 'neutral' : 'warn', context: sourceQuality === 'none' ? 'No source specified' : sourceQuality.charAt(0).toUpperCase() + sourceQuality.slice(1) };
 
+  // 2. Description Length
   const descLength = desc.length;
-  metrics.descriptionLength = { value: descLength, unit: 'chars', score: scoreBetween(descLength, 50, 1000), signal: descLength > 500 ? 'good' : descLength > 200 ? 'neutral' : 'bad' };
+  metrics.descriptionLength = { value: descLength, unit: 'chars', score: scoreBetween(descLength, 50, 1000), signal: descLength > 500 ? 'good' : descLength > 200 ? 'neutral' : 'bad', context: descLength > 500 ? 'Thorough description' : 'Brief description' };
 
+  // 3. Contract Detail Score (keyword-based, Claude upgrade Phase 2)
   const resolutionKeywords = ['resolve', 'resolution', 'will resolve to', 'yes if', 'no if', 'otherwise', 'source', 'oracle', 'official', 'deadline', 'by', 'before', 'after', 'criteria', 'qualify', 'does not qualify', 'consensus', 'reporting', 'announced', 'defined as', 'means', 'specifically', 'edge case', 'exception', 'excluding', 'including', 'AM ET', 'PM ET', 'UTC', 'EST'];
   const lowerDesc = desc.toLowerCase();
   let keywordHits = 0;
   for (const kw of resolutionKeywords) { if (lowerDesc.includes(kw.toLowerCase())) keywordHits++; }
-  metrics.contractDetailScore = { value: keywordHits, unit: `of ${resolutionKeywords.length} key terms found`, score: scoreBetween(keywordHits, 2, 15), signal: keywordHits >= 10 ? 'good' : keywordHits >= 5 ? 'neutral' : 'bad' };
+  metrics.contractDetailScore = { value: keywordHits, unit: `of ${resolutionKeywords.length} terms`, score: scoreBetween(keywordHits, 2, 15), signal: keywordHits >= 10 ? 'good' : keywordHits >= 5 ? 'neutral' : 'bad', context: keywordHits >= 10 ? 'Detailed contract' : keywordHits >= 5 ? 'Moderate detail' : 'Vague contract', _note: 'Keyword-based. Claude API analysis coming Phase 2.' };
 
+  // 4. Has End Date
   const hasEndDate = gammaMarket.endDate != null;
-  metrics.hasEndDate = { value: hasEndDate, unit: 'boolean', score: hasEndDate ? 8 : 3, signal: hasEndDate ? 'good' : 'warn' };
+  metrics.hasEndDate = { value: hasEndDate, unit: 'boolean', score: hasEndDate ? 8 : 3, signal: hasEndDate ? 'good' : 'warn', context: hasEndDate ? 'Defined timeline' : 'No end date — open-ended risk' };
 
+  // 5. Resolution Type
   const outcomes = gammaMarket.outcomes ? JSON.parse(gammaMarket.outcomes) : [];
   const resType = outcomes.length <= 2 ? 'binary' : 'multi-outcome';
-  metrics.resolutionType = { value: resType, unit: 'type', score: resType === 'binary' ? 8 : 6, signal: 'neutral' };
+  metrics.resolutionType = { value: resType, unit: 'type', score: resType === 'binary' ? 8 : 6, signal: 'neutral', context: resType === 'binary' ? 'Simple Yes/No' : `${outcomes.length} outcomes` };
 
-  // Open interest from /oi endpoint
+  // 6. Open Interest
   let oiValue = null;
-  if (openInterest && Array.isArray(openInterest) && openInterest.length > 0) {
-    oiValue = openInterest[0].value != null ? parseFloat(openInterest[0].value) : null;
-  }
-  metrics.openInterest = { value: oiValue != null ? parseFloat(oiValue.toFixed(2)) : null, unit: 'USD', score: oiValue != null ? scoreBetween(oiValue, 5000, 2000000) : null, signal: oiValue == null ? 'unavailable' : oiValue > 500000 ? 'good' : oiValue > 50000 ? 'neutral' : 'bad' };
+  if (openInterest && Array.isArray(openInterest) && openInterest.length > 0) oiValue = openInterest[0].value != null ? parseFloat(openInterest[0].value) : null;
+  metrics.openInterest = { value: fmt(oiValue, 2), unit: 'USD', score: oiValue != null ? scoreBetween(oiValue, 5000, 2000000) : null, signal: oiValue == null ? 'unavailable' : oiValue > 500000 ? 'good' : oiValue > 50000 ? 'neutral' : 'bad', context: oiValue != null ? `$${Math.round(oiValue).toLocaleString()} at stake` : null };
 
+  // 7. OI / Dispute Bond ratio — NEW
+  const disputeBond = 750;
+  let oiBondRatio = null;
+  if (oiValue != null) oiBondRatio = oiValue / disputeBond;
+  metrics.oiDisputeRatio = { value: fmt(oiBondRatio, 0), unit: '×', score: oiBondRatio != null ? scoreBetween(oiBondRatio, 10, 2000) : null, signal: oiBondRatio == null ? 'unavailable' : oiBondRatio > 500 ? 'good' : oiBondRatio > 50 ? 'neutral' : 'bad', context: oiBondRatio != null ? (oiBondRatio > 50 ? 'Dispute economically viable' : 'Low incentive to dispute') : null };
+
+  // 8. Largest Position — NEW
+  let allPositions = [];
+  if (holders && Array.isArray(holders)) {
+    for (const side of holders) {
+      if (side.holders && Array.isArray(side.holders)) {
+        for (const h of side.holders) allPositions.push(parseFloat(h.amount || 0));
+      }
+    }
+  }
+  const largestPos = allPositions.length > 0 ? Math.max(...allPositions) : null;
+  metrics.largestPosition = { value: fmt(largestPos, 2), unit: 'USD', score: null, signal: largestPos == null ? 'unavailable' : 'neutral', context: largestPos != null ? `$${Math.round(largestPos).toLocaleString()} — strong incentive for correct resolution` : null };
+
+  // 9. Resolution Time Risk
   const endDate = gammaMarket.endDate;
   let daysLeft = null;
   if (endDate) { daysLeft = Math.floor((new Date(endDate) - new Date()) / (1000 * 60 * 60 * 24)); if (daysLeft < 0) daysLeft = 0; }
-  metrics.resolutionTimeRisk = { value: daysLeft, unit: 'days remaining', score: daysLeft != null ? scoreBetween(daysLeft, 1, 180) : null, signal: daysLeft == null ? 'unavailable' : daysLeft > 60 ? 'good' : daysLeft > 14 ? 'neutral' : 'warn' };
+  metrics.resolutionTimeRisk = { value: daysLeft, unit: 'days remaining', score: daysLeft != null ? scoreBetween(daysLeft, 1, 180) : null, signal: daysLeft == null ? 'unavailable' : daysLeft > 60 ? 'good' : daysLeft > 14 ? 'neutral' : 'warn', context: daysLeft == null ? null : daysLeft > 60 ? 'No time pressure' : daysLeft > 14 ? 'Adequate time' : 'Resolution approaching' };
 
-  const scorable = ['resolutionSource', 'descriptionLength', 'contractDetailScore', 'hasEndDate', 'resolutionType', 'openInterest', 'resolutionTimeRisk'];
+  // Pillar score
+  const scorable = ['resolutionSource', 'descriptionLength', 'contractDetailScore', 'hasEndDate', 'resolutionType', 'openInterest', 'oiDisputeRatio', 'resolutionTimeRisk'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  return { score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null, confidence: scores.length >= 5 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 7, llmAnalysis: 'Not yet enabled — Claude API integration coming soon', metrics };
+  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
+
+  // Warning
+  let warning = null;
+  if (!hasResSource) warning = { type: 'danger', text: 'No named resolution source. Resolution depends on subjective consensus, which has historically caused disputes.' };
+  else if (sourceQuality === 'subjective') warning = { type: 'warning', text: `Resolution source "${resSource}" is subjective. Consider whether this could be disputed.` };
+  else if (keywordHits < 5) warning = { type: 'warning', text: 'Contract lacks detail. Few resolution criteria specified — edge cases may cause disputes.' };
+  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: 'Well-defined contract with clear resolution criteria and adequate stake.' };
+
+  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 6 ? 'high' : scores.length >= 4 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, llmAnalysis: 'Not yet enabled — Claude API integration coming Phase 2', metrics };
 }
 
 // ─── COMPOSITE POLYSCORE ─────────────────────────────────────
