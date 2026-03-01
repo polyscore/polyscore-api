@@ -29,19 +29,20 @@ module.exports = async function handler(req, res) {
           try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
 
           return {
-            id: m.id,
-            question: m.question,
-            slug: m.slug,
-            conditionId: m.conditionId,
-            active: m.active,
-            closed: m.closed,
-            outcomes,
-            outcomePrices,
-            volume: m.volume || null,
-            liquidity: m.liquidity || null,
-            startDate: m.startDate || null,
-            endDate: m.endDate || null,
-          };
+  id: m.id,
+  question: m.question,
+  groupItemTitle: m.groupItemTitle || null,
+  slug: m.slug,
+  conditionId: m.conditionId,
+  active: m.active,
+  closed: m.closed,
+  outcomes,
+  outcomePrices,
+  volume: m.volume || null,
+  liquidity: m.liquidity || null,
+  startDate: m.startDate || null,
+  endDate: m.endDate || null,
+};
         });
 
         return {
