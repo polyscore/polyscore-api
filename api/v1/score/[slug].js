@@ -574,6 +574,7 @@ return res.status(200).json({
   blockingIssues,
   fetchTime: parseFloat(fetchTime),
   tradesSampled: allTrades.length,
+  // ... rest stays the same
 
       market: {
         title: market.question,
