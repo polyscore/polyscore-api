@@ -4,18 +4,18 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'GET only', status: 405 } });
   }
-  const q = (req.query.q || '').trim();
+  var q = (req.query.q || '').trim();
   if (!q) {
     return res.status(400).json({ error: { code: 'INVALID_INPUT', message: 'Provide a search query via ?q=', status: 400 } });
   }
 
   try {
-    let query = q;
-    const urlMatch = q.match(/polymarket\.com\/(?:event|market)\/([a-z0-9-]+)/i);
+    var query = q;
+    var urlMatch = q.match(/polymarket\.com\/(?:event|market)\/([a-z0-9-]+)/i);
     if (urlMatch) query = urlMatch[1].split('?')[0];
 
     function formatMarket(m) {
-      let outcomes = [], outcomePrices = [];
+      var outcomes = [], outcomePrices = [];
       try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
       try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
       return {
@@ -25,9 +25,9 @@ module.exports = async function handler(req, res) {
         slug: m.slug,
         conditionId: m.conditionId,
         active: m.active,
-  closed: m.closed,
-        outcomes,
-        outcomePrices,
+        closed: m.closed,
+        outcomes: outcomes,
+        outcomePrices: outcomePrices,
         volume: m.volume || null,
         liquidity: m.liquidity || null,
         startDate: m.startDate || null,
@@ -35,7 +35,7 @@ module.exports = async function handler(req, res) {
       };
     }
 
-function sortMarkets(markets) {
+    function sortMarkets(markets) {
       if (markets.length <= 1) return markets;
       var leadingNums = markets.map(function(m) {
         var title = (m.groupItemTitle || '').toString();
@@ -51,18 +51,16 @@ function sortMarkets(markets) {
           return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
         });
       }
-
-      // Check for arrow groups (↓ cuts / ↑ hikes)
       var hasArrows = markets.some(function(m) {
         var t = (m.groupItemTitle || '').toString();
-        return t.indexOf('↓') !== -1 || t.indexOf('↑') !== -1;
+        return t.indexOf('\u2193') !== -1 || t.indexOf('\u2191') !== -1;
       });
       if (hasArrows) {
-        var downs = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('↓') !== -1; });
-        var ups = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('↑') !== -1; });
+        var downs = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('\u2193') !== -1; });
+        var ups = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('\u2191') !== -1; });
         var others = markets.filter(function(m) {
           var t = m.groupItemTitle || '';
-          return t.indexOf('↓') === -1 && t.indexOf('↑') === -1;
+          return t.indexOf('\u2193') === -1 && t.indexOf('\u2191') === -1;
         });
         var getRate = function(m) {
           var match = (m.groupItemTitle || '').match(/([\d.]+)%/);
@@ -72,8 +70,6 @@ function sortMarkets(markets) {
         ups.sort(function(a, b) { return getRate(a) - getRate(b); });
         return downs.concat(ups).concat(others);
       }
-
-      // Default: sort by YES price descending
       return markets.sort(function(a, b) {
         var aPrice = 0, bPrice = 0;
         var aRaw = a.outcomePrices;
@@ -96,18 +92,18 @@ function sortMarkets(markets) {
       var markets = sorted.map(formatMarket);
       return {
         id: event.id,
-        active: m.active,
-  closed: m.closed,
         title: event.title,
         slug: event.slug,
         image: event.image || event.icon || null,
         description: event.description ? event.description.slice(0, 200) + '...' : null,
+        active: event.active,
+        closed: event.closed,
         volume: event.volume || null,
         liquidity: event.liquidity || null,
         startDate: event.startDate || null,
         endDate: event.endDate || null,
         marketCount: markets.length,
-        markets,
+        markets: markets,
       };
     }
 
@@ -139,7 +135,7 @@ function sortMarkets(markets) {
     return res.status(200).json({
       query: q,
       resultCount: events.length,
-      events,
+      events: events,
     });
   } catch (err) {
     console.error('Search endpoint error:', err);
