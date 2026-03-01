@@ -24,17 +24,16 @@ module.exports = async function handler(req, res) {
         if (event && event.id) {
           const markets = (event.markets || [])
             .filter(m => m.active && !m.closed)
-            .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
-            .map(m => {
-              let outcomes = [], outcomePrices = [];
-              try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
-              try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
-              return {
-                id: m.id, question: m.question, groupItemTitle: m.groupItemTitle || null,
-                slug: m.slug, conditionId: m.conditionId, active: m.active, closed: m.closed,
-                outcomes, outcomePrices, volume: m.volume || null, liquidity: m.liquidity || null,
-                startDate: m.startDate || null, endDate: m.endDate || null,
-              };
+            .sort((a, b) => {
+  const aNum = parseFloat(a.groupItemThreshold);
+  const bNum = parseFloat(b.groupItemThreshold);
+  const bothNumeric = !isNaN(aNum) && !isNaN(bNum);
+  if (bothNumeric) return aNum - bNum;
+  let aPrice = 0, bPrice = 0;
+  try { aPrice = parseFloat(JSON.parse(a.outcomePrices || '[]')[0] || 0); } catch(e) {}
+  try { bPrice = parseFloat(JSON.parse(b.outcomePrices || '[]')[0] || 0); } catch(e) {}
+  return bPrice - aPrice;
+})
             });
           return res.status(200).json({
             query: q,
@@ -65,17 +64,16 @@ module.exports = async function handler(req, res) {
       .map(event => {
         const markets = (event.markets || [])
           .filter(m => m.active && !m.closed)
-          .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
-          .map(m => {
-            let outcomes = [], outcomePrices = [];
-            try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
-            try { outcomePrices = JSON.parse(m.outcomePrices || '[]'); } catch(e) {}
-            return {
-              id: m.id, question: m.question, groupItemTitle: m.groupItemTitle || null,
-              slug: m.slug, conditionId: m.conditionId, active: m.active, closed: m.closed,
-              outcomes, outcomePrices, volume: m.volume || null, liquidity: m.liquidity || null,
-              startDate: m.startDate || null, endDate: m.endDate || null,
-            };
+          .sort((a, b) => {
+  const aNum = parseFloat(a.groupItemThreshold);
+  const bNum = parseFloat(b.groupItemThreshold);
+  const bothNumeric = !isNaN(aNum) && !isNaN(bNum);
+  if (bothNumeric) return aNum - bNum;
+  let aPrice = 0, bPrice = 0;
+  try { aPrice = parseFloat(JSON.parse(a.outcomePrices || '[]')[0] || 0); } catch(e) {}
+  try { bPrice = parseFloat(JSON.parse(b.outcomePrices || '[]')[0] || 0); } catch(e) {}
+  return bPrice - aPrice;
+})
           });
         return {
           id: event.id, title: event.title, slug: event.slug,
