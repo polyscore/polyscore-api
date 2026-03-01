@@ -35,12 +35,17 @@ module.exports = async function handler(req, res) {
       };
     }
 
-    // Helper: sort markets — numeric by threshold, text by price desc
+    // Helper: sort markets — numeric groups by threshold, text groups by price desc
     function sortMarkets(markets) {
+      const allNumeric = markets.length > 0 && markets.every(m =>
+        m.groupItemThreshold != null && /^\d+\+?$/.test(m.groupItemThreshold.toString())
+      );
+      if (allNumeric) {
+        return markets.sort((a, b) =>
+          parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold)
+        );
+      }
       return markets.sort((a, b) => {
-        const aNum = parseFloat(a.groupItemThreshold);
-        const bNum = parseFloat(b.groupItemThreshold);
-        if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
         let aPrice = 0, bPrice = 0;
         try { aPrice = parseFloat(JSON.parse(a.outcomePrices || '[]')[0] || 0); } catch(e) {}
         try { bPrice = parseFloat(JSON.parse(b.outcomePrices || '[]')[0] || 0); } catch(e) {}
