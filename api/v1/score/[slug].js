@@ -555,13 +555,25 @@ module.exports = async function handler(req, res) {
     const resolution = computeResolutionMetrics(market, openInterest, holders);
 
     const polyscore = computePolyScore(liquidity, discovery, participation, maturity, resolution);
-    const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 
-    return res.status(200).json({
-      polyscore,
-      polyscoreStatus: polyscore != null ? 'All 5 pillars computed' : 'Partial — some pillars unavailable',
-      fetchTime: parseFloat(fetchTime),
-      tradesSampled: allTrades.length,
+const risk = polyscore >= 7 ? { level: 'low', label: 'Low Risk' } : polyscore >= 4 ? { level: 'elevated', label: 'Elevated' } : polyscore != null ? { level: 'high', label: 'High Risk' } : { level: 'unknown', label: 'Unknown' };
+
+const blockingIssues = [];
+const pillarEntries = { liquidity, discovery, participation, maturity, resolution };
+for (const [name, pillar] of Object.entries(pillarEntries)) {
+  if (pillar.score != null && pillar.score < 3) {
+    blockingIssues.push({ pillar: name, score: pillar.score, warning: pillar.warning?.text || `${name} score critically low` });
+  }
+}
+
+const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
+return res.status(200).json({
+  polyscore,
+  polyscoreStatus: polyscore != null ? 'All 5 pillars computed' : 'Partial — some pillars unavailable',
+  risk,
+  blockingIssues,
+  fetchTime: parseFloat(fetchTime),
+  tradesSampled: allTrades.length,
 
       market: {
         title: market.question,
