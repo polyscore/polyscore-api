@@ -24,6 +24,8 @@ module.exports = async function handler(req, res) {
         groupItemTitle: m.groupItemTitle || null,
         slug: m.slug,
         conditionId: m.conditionId,
+        active: m.active,
+  closed: m.closed,
         outcomes,
         outcomePrices,
         volume: m.volume || null,
@@ -94,6 +96,8 @@ function sortMarkets(markets) {
       var markets = sorted.map(formatMarket);
       return {
         id: event.id,
+        active: m.active,
+  closed: m.closed,
         title: event.title,
         slug: event.slug,
         image: event.image || event.icon || null,
