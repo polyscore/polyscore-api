@@ -151,38 +151,84 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, allTrades) {
 
 // ─── DISCOVERY PILLAR ────────────────────────────────────────
 
-function computeDiscoveryMetrics(midpoint, priceHistory30d) {
+function computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h) {
   const metrics = {};
+  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
   let history = [];
   if (priceHistory30d) { const raw = Array.isArray(priceHistory30d.history) ? priceHistory30d.history : Array.isArray(priceHistory30d) ? priceHistory30d : []; history = [...raw].sort((a, b) => (a.t || 0) - (b.t || 0)); }
 
-  metrics.currentPrice = { value: midValue, unit: 'probability', score: null, signal: midValue == null ? 'unavailable' : 'neutral' };
+  // 1. Current price
+  metrics.currentPrice = { value: midValue, unit: 'probability', score: null, signal: midValue == null ? 'unavailable' : 'neutral', context: midValue != null ? `${Math.round(midValue * 100)}¢ YES` : null };
 
+  // 2. Price change 24h
   let priceChange24h = null;
   if (history.length >= 2 && midValue != null) { const prior = history[history.length - 2]?.p; if (prior != null && prior > 0) priceChange24h = ((midValue - prior) / prior) * 100; }
-  metrics.priceChange24h = { value: priceChange24h != null ? parseFloat(priceChange24h.toFixed(2)) : null, unit: '%', score: null, signal: priceChange24h == null ? 'unavailable' : Math.abs(priceChange24h) > 10 ? 'warn' : 'neutral' };
+  metrics.priceChange24h = { value: fmt(priceChange24h, 2), unit: '%', score: null, signal: priceChange24h == null ? 'unavailable' : Math.abs(priceChange24h) > 10 ? 'warn' : 'neutral', context: priceChange24h == null ? null : Math.abs(priceChange24h) < 1 ? 'Flat' : priceChange24h > 0 ? 'Up' : 'Down' };
 
+  // 3. Price range 7d
   const last7 = history.slice(-7);
   let low7d = null, high7d = null;
   if (last7.length > 0) { const prices = last7.map(c => c.p).filter(p => p != null); if (prices.length > 0) { low7d = Math.min(...prices); high7d = Math.max(...prices); } }
-  metrics.priceRange7d = { value: low7d != null ? [parseFloat(low7d.toFixed(3)), parseFloat(high7d.toFixed(3))] : null, unit: 'range', score: null, signal: low7d == null ? 'unavailable' : 'neutral' };
+  metrics.priceRange7d = { value: low7d != null ? [fmt(low7d, 3), fmt(high7d, 3)] : null, unit: 'range', score: null, signal: low7d == null ? 'unavailable' : 'neutral', context: low7d != null ? `${fmt(low7d * 100, 1)}¢ – ${fmt(high7d * 100, 1)}¢` : null };
 
+  // 4. Volatility 24h — NEW
+  let vol24h = null;
+  let hourly = [];
+  if (priceHistory24h) { const raw = Array.isArray(priceHistory24h.history) ? priceHistory24h.history : Array.isArray(priceHistory24h) ? priceHistory24h : []; hourly = [...raw].sort((a, b) => (a.t || 0) - (b.t || 0)); }
+  if (hourly.length >= 3) {
+    const prices = hourly.map(c => c.p).filter(p => p != null);
+    const returns = [];
+    for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); }
+    if (returns.length >= 2) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length; vol24h = Math.sqrt(variance) * 100; }
+  }
+  metrics.volatility24h = { value: fmt(vol24h, 2), unit: '%', score: vol24h != null ? scoreCloseTo(vol24h, 4, 30) : null, signal: vol24h == null ? 'unavailable' : vol24h > 2 && vol24h < 10 ? 'good' : vol24h < 1 ? 'neutral' : 'warn', context: vol24h == null ? null : vol24h < 2 ? 'Stable' : vol24h < 10 ? 'Normal range' : 'Volatile' };
+
+  // 5. Realized vol 7d
   let realizedVol7d = null;
   if (last7.length >= 3) { const prices = last7.map(c => c.p).filter(p => p != null); const returns = []; for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); } if (returns.length >= 2) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length; realizedVol7d = Math.sqrt(variance) * 100; } }
-  metrics.realizedVol7d = { value: realizedVol7d != null ? parseFloat(realizedVol7d.toFixed(2)) : null, unit: '%', score: realizedVol7d != null ? scoreCloseTo(realizedVol7d, 6, 30) : null, signal: realizedVol7d == null ? 'unavailable' : realizedVol7d > 2 && realizedVol7d < 15 ? 'good' : realizedVol7d < 1 ? 'neutral' : 'warn' };
+  metrics.realizedVol7d = { value: fmt(realizedVol7d, 2), unit: '%', score: realizedVol7d != null ? scoreCloseTo(realizedVol7d, 6, 30) : null, signal: realizedVol7d == null ? 'unavailable' : realizedVol7d > 2 && realizedVol7d < 15 ? 'good' : realizedVol7d < 1 ? 'neutral' : 'warn', context: realizedVol7d == null ? null : realizedVol7d < 2 ? 'Very stable' : realizedVol7d < 10 ? 'Normal range' : 'High volatility' };
 
+  // 6. Price Momentum 7d — NEW
+  let momentum7d = null;
+  if (last7.length >= 2 && midValue != null) { const firstPrice = last7[0]?.p; if (firstPrice != null) momentum7d = (midValue - firstPrice) * 100; }
+  metrics.priceMomentum = { value: fmt(momentum7d, 1), unit: '¢', score: null, signal: momentum7d == null ? 'unavailable' : 'neutral', context: momentum7d == null ? null : Math.abs(momentum7d) < 1 ? 'Flat' : momentum7d > 0 ? `+${fmt(momentum7d, 1)}¢ uptrend` : `${fmt(momentum7d, 1)}¢ downtrend` };
+
+  // 7. Information Ratio — NEW
+  let infoRatio = null;
+  if (history.length >= 5) {
+    const prices = history.map(c => c.p).filter(p => p != null);
+    const returns = [];
+    for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); }
+    if (returns.length >= 3) {
+      const mean = returns.reduce((a,b) => a+b, 0) / returns.length;
+      const std = Math.sqrt(returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length);
+      if (std > 0) infoRatio = Math.abs(mean) / std;
+    }
+  }
+  metrics.informationRatio = { value: fmt(infoRatio, 3), unit: 'ratio', score: infoRatio != null ? scoreBetween(infoRatio, 0.05, 1.5) : null, signal: infoRatio == null ? 'unavailable' : infoRatio > 0.5 ? 'good' : infoRatio > 0.1 ? 'neutral' : 'bad', context: infoRatio == null ? null : infoRatio > 0.5 ? 'Good signal-to-noise' : infoRatio > 0.1 ? 'Moderate signal' : 'Noisy' };
+
+  // 8. Autocorrelation
   let autocorrelation = null;
   if (history.length >= 5) { const prices = history.map(c => c.p).filter(p => p != null); const returns = []; for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); } if (returns.length >= 4) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; let num = 0, den = 0; for (let i = 1; i < returns.length; i++) num += (returns[i] - mean) * (returns[i-1] - mean); for (let i = 0; i < returns.length; i++) den += Math.pow(returns[i] - mean, 2); if (den > 0) autocorrelation = num / den; } }
-  metrics.autocorrelation = { value: autocorrelation != null ? parseFloat(autocorrelation.toFixed(3)) : null, unit: 'corr', score: autocorrelation != null ? scoreCloseTo(autocorrelation, 0, 1) : null, signal: autocorrelation == null ? 'unavailable' : Math.abs(autocorrelation) < 0.2 ? 'good' : Math.abs(autocorrelation) < 0.5 ? 'neutral' : 'warn' };
+  metrics.autocorrelation = { value: fmt(autocorrelation, 3), unit: 'corr', score: autocorrelation != null ? scoreCloseTo(autocorrelation, 0, 1) : null, signal: autocorrelation == null ? 'unavailable' : Math.abs(autocorrelation) < 0.2 ? 'good' : Math.abs(autocorrelation) < 0.5 ? 'neutral' : 'warn', context: autocorrelation == null ? null : Math.abs(autocorrelation) < 0.2 ? 'Low predictability' : 'Trending pattern detected' };
 
+  // 9. Price Efficiency (composite)
   let priceEfficiency = null;
   if (metrics.autocorrelation.score != null && metrics.realizedVol7d.score != null) priceEfficiency = parseFloat((metrics.autocorrelation.score * 0.6 + metrics.realizedVol7d.score * 0.4).toFixed(1));
-  metrics.priceEfficiency = { value: priceEfficiency, unit: '/10', score: priceEfficiency != null ? Math.round(priceEfficiency) : null, signal: priceEfficiency == null ? 'unavailable' : priceEfficiency >= 7 ? 'good' : priceEfficiency >= 4 ? 'neutral' : 'bad' };
+  metrics.priceEfficiency = { value: priceEfficiency, unit: '/10', score: priceEfficiency != null ? Math.round(priceEfficiency) : null, signal: priceEfficiency == null ? 'unavailable' : priceEfficiency >= 7 ? 'good' : priceEfficiency >= 4 ? 'neutral' : 'bad', context: priceEfficiency == null ? null : priceEfficiency >= 7 ? 'Efficient price discovery' : 'Potential inefficiency' };
 
-  const scorable = ['realizedVol7d', 'autocorrelation', 'priceEfficiency'];
+  // Pillar score
+  const scorable = ['volatility24h', 'realizedVol7d', 'informationRatio', 'autocorrelation', 'priceEfficiency'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  return { score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null, confidence: scores.length >= 3 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 6, metrics };
+  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
+
+  // Warning
+  let warning = null;
+  if (autocorrelation != null && Math.abs(autocorrelation) > 0.4) warning = { type: 'warning', text: 'High autocorrelation. Price may be trending rather than reflecting new information.' };
+  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: 'Efficient price discovery. Price changes appear driven by genuine information.' };
+
+  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, metrics };
 }
 
 // ─── PARTICIPATION PILLAR ────────────────────────────────────
