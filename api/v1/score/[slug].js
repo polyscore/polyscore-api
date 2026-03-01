@@ -319,31 +319,38 @@ function computeParticipationMetrics(holders, allTrades) {
 
 // ─── MATURITY PILLAR ─────────────────────────────────────────
 
-function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades) {
+function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades, orderbook, midpoint) {
   const metrics = {};
+  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
   const now = new Date();
+  const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
 
+  // 1. Market Age
   const startTime = gammaMarket.startDate || gammaMarket.createdAt;
   let marketAge = null;
   if (startTime) marketAge = Math.floor((now - new Date(startTime)) / (1000 * 60 * 60 * 24));
-  metrics.marketAge = { value: marketAge, unit: 'days', score: scoreBetween(marketAge, 1, 180), signal: marketAge == null ? 'unavailable' : marketAge > 60 ? 'good' : marketAge > 14 ? 'neutral' : 'bad' };
+  metrics.marketAge = { value: marketAge, unit: 'days', score: scoreBetween(marketAge, 1, 180), signal: marketAge == null ? 'unavailable' : marketAge > 60 ? 'good' : marketAge > 14 ? 'neutral' : 'bad', context: marketAge == null ? null : marketAge > 60 ? 'Established' : marketAge > 14 ? 'Maturing' : 'Very new' };
 
+  // 2. Days to Resolution
   const endTime = gammaMarket.endDate;
   let daysToResolution = null;
   if (endTime) { daysToResolution = Math.floor((new Date(endTime) - now) / (1000 * 60 * 60 * 24)); if (daysToResolution < 0) daysToResolution = 0; }
-  metrics.daysToResolution = { value: daysToResolution, unit: 'days', score: null, signal: daysToResolution == null ? 'unavailable' : daysToResolution > 30 ? 'good' : daysToResolution > 7 ? 'neutral' : 'warn' };
+  metrics.daysToResolution = { value: daysToResolution, unit: 'days', score: null, signal: daysToResolution == null ? 'unavailable' : daysToResolution > 30 ? 'good' : daysToResolution > 7 ? 'neutral' : 'warn', context: daysToResolution == null ? null : daysToResolution > 60 ? 'Plenty of time' : daysToResolution > 14 ? 'Adequate time' : 'Approaching resolution' };
 
+  // 3. Lifecycle Stage
   let lifecycleStage = null;
   if (marketAge != null && daysToResolution != null) { const total = marketAge + daysToResolution; const pct = total > 0 ? (marketAge / total) * 100 : 0; if (pct < 25) lifecycleStage = 'Early'; else if (pct < 50) lifecycleStage = 'Growth'; else if (pct < 75) lifecycleStage = 'Mature'; else if (pct < 90) lifecycleStage = 'Late'; else lifecycleStage = 'Near Expiry'; }
   const stageScores = { 'Early': 5, 'Growth': 8, 'Mature': 10, 'Late': 6, 'Near Expiry': 3 };
-  metrics.lifecycleStage = { value: lifecycleStage, unit: 'stage', score: lifecycleStage ? stageScores[lifecycleStage] : null, signal: lifecycleStage == null ? 'unavailable' : lifecycleStage === 'Mature' || lifecycleStage === 'Growth' ? 'good' : lifecycleStage === 'Near Expiry' ? 'warn' : 'neutral' };
+  metrics.lifecycleStage = { value: lifecycleStage, unit: 'stage', score: lifecycleStage ? stageScores[lifecycleStage] : null, signal: lifecycleStage == null ? 'unavailable' : lifecycleStage === 'Mature' || lifecycleStage === 'Growth' ? 'good' : lifecycleStage === 'Near Expiry' ? 'warn' : 'neutral', context: lifecycleStage == null ? null : lifecycleStage === 'Growth' || lifecycleStage === 'Mature' ? 'Optimal stage' : lifecycleStage };
 
+  // 4. Price Stability
   let priceStability = null;
   let historyPrices = [];
   if (priceHistory30d) { const raw = Array.isArray(priceHistory30d.history) ? priceHistory30d.history : Array.isArray(priceHistory30d) ? priceHistory30d : []; historyPrices = raw.map(c => c.p).filter(p => p != null); }
   if (historyPrices.length >= 5) { const mean = historyPrices.reduce((a,b) => a+b, 0) / historyPrices.length; const variance = historyPrices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / historyPrices.length; priceStability = Math.sqrt(variance); }
-  metrics.priceStability = { value: priceStability != null ? parseFloat(priceStability.toFixed(4)) : null, unit: 'σ', score: priceStability != null ? (11 - scoreBetween(priceStability, 0.01, 0.3)) : null, signal: priceStability == null ? 'unavailable' : priceStability < 0.05 ? 'good' : priceStability < 0.15 ? 'neutral' : 'bad' };
+  metrics.priceStability = { value: fmt(priceStability, 4), unit: 'σ', score: priceStability != null ? (11 - scoreBetween(priceStability, 0.01, 0.3)) : null, signal: priceStability == null ? 'unavailable' : priceStability < 0.05 ? 'good' : priceStability < 0.15 ? 'neutral' : 'bad', context: priceStability == null ? null : priceStability < 0.05 ? 'Stable pricing' : priceStability < 0.15 ? 'Moderate variability' : 'Volatile pricing' };
 
+  // 5. Activity Trend
   let activityTrend = null;
   if (allTrades && allTrades.length > 0) {
     const nowSec = Date.now() / 1000;
@@ -352,14 +359,43 @@ function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades) {
     if (older > 0) activityTrend = recent / older;
     else if (recent > 0) activityTrend = 2.0;
   }
-  metrics.activityTrend = { value: activityTrend != null ? parseFloat(activityTrend.toFixed(2)) : null, unit: 'ratio', score: activityTrend != null ? scoreBetween(activityTrend, 0.2, 3) : null, signal: activityTrend == null ? 'unavailable' : activityTrend > 1.2 ? 'good' : activityTrend > 0.5 ? 'neutral' : 'bad' };
+  metrics.activityTrend = { value: fmt(activityTrend, 2), unit: 'ratio', score: activityTrend != null ? scoreBetween(activityTrend, 0.2, 3) : null, signal: activityTrend == null ? 'unavailable' : activityTrend > 1.2 ? 'good' : activityTrend > 0.5 ? 'neutral' : 'bad', context: activityTrend == null ? null : activityTrend > 1.5 ? 'Growing' : activityTrend > 0.8 ? 'Stable' : 'Declining' };
 
+  // 6. Total Volume
   const totalVolume = parseFloat(gammaMarket.volume || 0);
-  metrics.totalVolume = { value: totalVolume > 0 ? parseFloat(totalVolume.toFixed(2)) : null, unit: 'USD', score: scoreBetween(totalVolume, 10000, 5000000), signal: totalVolume > 1000000 ? 'good' : totalVolume > 100000 ? 'neutral' : 'bad' };
+  metrics.totalVolume = { value: totalVolume > 0 ? fmt(totalVolume, 2) : null, unit: 'USD', score: scoreBetween(totalVolume, 10000, 5000000), signal: totalVolume > 1000000 ? 'good' : totalVolume > 100000 ? 'neutral' : 'bad', context: totalVolume > 1000000 ? 'High lifetime volume' : totalVolume > 100000 ? 'Moderate volume' : 'Low volume' };
 
-  const scorable = ['marketAge', 'lifecycleStage', 'priceStability', 'activityTrend', 'totalVolume'];
+  // 7. Exit Liquidity — NEW (composite of bid depth + lifecycle stage)
+  let exitLiquidity = null;
+  let exitLabel = null;
+  if (orderbook && midValue && lifecycleStage) {
+    const bids = orderbook.bids || [];
+    let bidDepth5 = 0;
+    for (const bid of bids) {
+      const p = parseFloat(bid.price), s = parseFloat(bid.size);
+      const d = ((midValue - p) / midValue) * 100;
+      if (d <= 5) bidDepth5 += p * s;
+    }
+    const depthScore = scoreBetween(bidDepth5, 1000, 100000);
+    const stageMultiplier = { 'Early': 0.7, 'Growth': 1.0, 'Mature': 1.0, 'Late': 0.6, 'Near Expiry': 0.3 };
+    exitLiquidity = parseFloat((depthScore * (stageMultiplier[lifecycleStage] || 0.5)).toFixed(1));
+    exitLabel = exitLiquidity >= 7 ? 'Good' : exitLiquidity >= 4 ? 'Moderate' : 'Poor';
+  }
+  metrics.exitLiquidity = { value: exitLabel, unit: 'assessment', score: exitLiquidity != null ? Math.round(exitLiquidity) : null, signal: exitLiquidity == null ? 'unavailable' : exitLiquidity >= 7 ? 'good' : exitLiquidity >= 4 ? 'neutral' : 'bad', context: daysToResolution != null ? `${daysToResolution} days runway` : null };
+
+  // Pillar score
+  const scorable = ['marketAge', 'lifecycleStage', 'priceStability', 'activityTrend', 'totalVolume', 'exitLiquidity'];
   const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  return { score: scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null, confidence: scores.length >= 4 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 6, metrics };
+  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
+
+  // Warning
+  let warning = null;
+  if (lifecycleStage === 'Near Expiry') warning = { type: 'danger', text: `Market approaching expiry. ${daysToResolution} days remaining. Exit liquidity may deteriorate rapidly.` };
+  else if (activityTrend != null && activityTrend < 0.5) warning = { type: 'warning', text: 'Declining activity. Trading volume has dropped significantly.' };
+  else if (exitLabel === 'Poor') warning = { type: 'warning', text: 'Poor exit liquidity. You may have difficulty selling your position at a fair price.' };
+  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: `Good timing. Market in ${lifecycleStage} phase with ${activityTrend > 1.2 ? 'growing' : 'stable'} activity. ${daysToResolution} days until resolution.` };
+
+  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 7, warning, metrics };
 }
 
 // ─── RESOLUTION PILLAR ───────────────────────────────────────
