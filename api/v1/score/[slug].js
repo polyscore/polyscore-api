@@ -551,7 +551,7 @@ module.exports = async function handler(req, res) {
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, allTrades);
     const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h);
     const participation = computeParticipationMetrics(holders, allTrades);
-    const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades);
+    const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades, orderbook, midpoint);
     const resolution = computeResolutionMetrics(market, openInterest, holders);
 
     const polyscore = computePolyScore(liquidity, discovery, participation, maturity, resolution);
