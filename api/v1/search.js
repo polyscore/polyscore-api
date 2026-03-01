@@ -33,20 +33,33 @@ module.exports = async function handler(req, res) {
       };
     }
 
-    function sortMarkets(markets) {
-      if (markets.length <= 1) return markets;
+function sortMarkets(markets) {
+  if (markets.length <= 1) return markets;
 
-      // Check if thresholds form a real numeric sequence (not all the same)
-      const thresholds = markets.map(m => (m.groupItemThreshold || '').toString());
-      const allNumeric = thresholds.every(t => /^\d+\+?$/.test(t));
-      const uniqueThresholds = new Set(thresholds);
-      const isNumericSequence = allNumeric && uniqueThresholds.size > 1;
+  const thresholds = markets.map(m => (m.groupItemThreshold || '').toString());
+  const allNumeric = thresholds.every(t => /^\d+\+?$/.test(t));
+  const uniqueThresholds = new Set(thresholds);
+  const isNumericSequence = allNumeric && uniqueThresholds.size > 1;
 
-      if (isNumericSequence) {
-        return markets.sort((a, b) =>
-          parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold)
-        );
-      }
+  if (isNumericSequence) {
+    return markets.sort((a, b) =>
+      parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold)
+    );
+  }
+
+  return markets.sort((a, b) => {
+    let aPrice = 0, bPrice = 0;
+    try {
+      const aOp = typeof a.outcomePrices === 'string' ? JSON.parse(a.outcomePrices) : a.outcomePrices;
+      aPrice = parseFloat(aOp[0] || 0);
+    } catch(e) {}
+    try {
+      const bOp = typeof b.outcomePrices === 'string' ? JSON.parse(b.outcomePrices) : b.outcomePrices;
+      bPrice = parseFloat(bOp[0] || 0);
+    } catch(e) {}
+    return bPrice - aPrice;
+  });
+}
 
       // Text-based or same-threshold: sort by YES price descending
       return markets.sort((a, b) => {
