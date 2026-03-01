@@ -473,10 +473,10 @@ module.exports = async function handler(req, res) {
 
     // Compute all 5 pillars
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, allTrades);
-    const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d);
+    const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h);
     const participation = computeParticipationMetrics(holders, allTrades);
     const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades);
-    const resolution = computeResolutionMetrics(market, openInterest);
+    const resolution = computeResolutionMetrics(market, openInterest, holders);
 
     const polyscore = computePolyScore(liquidity, discovery, participation, maturity, resolution);
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
