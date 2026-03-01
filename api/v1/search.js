@@ -10,12 +10,10 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Extract slug from Polymarket URLs
     let query = q;
     const urlMatch = q.match(/polymarket\.com\/(?:event|market)\/([a-z0-9-]+)/i);
     if (urlMatch) query = urlMatch[1].split('?')[0];
 
-    // Helper: format a raw market object
     function formatMarket(m) {
       let outcomes = [], outcomePrices = [];
       try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
@@ -35,16 +33,22 @@ module.exports = async function handler(req, res) {
       };
     }
 
-    // Helper: sort markets — numeric groups by threshold, text groups by price desc
     function sortMarkets(markets) {
-      const allNumeric = markets.length > 0 && markets.every(m =>
-        m.groupItemThreshold != null && /^\d+\+?$/.test(m.groupItemThreshold.toString())
-      );
-      if (allNumeric) {
+      if (markets.length <= 1) return markets;
+
+      // Check if thresholds form a real numeric sequence (not all the same)
+      const thresholds = markets.map(m => (m.groupItemThreshold || '').toString());
+      const allNumeric = thresholds.every(t => /^\d+\+?$/.test(t));
+      const uniqueThresholds = new Set(thresholds);
+      const isNumericSequence = allNumeric && uniqueThresholds.size > 1;
+
+      if (isNumericSequence) {
         return markets.sort((a, b) =>
           parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold)
         );
       }
+
+      // Text-based or same-threshold: sort by YES price descending
       return markets.sort((a, b) => {
         let aPrice = 0, bPrice = 0;
         try { aPrice = parseFloat(JSON.parse(a.outcomePrices || '[]')[0] || 0); } catch(e) {}
@@ -53,7 +57,6 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Helper: format a raw event object
     function formatEvent(event) {
       const activeMarkets = (event.markets || []).filter(m => m.active && !m.closed);
       const sorted = sortMarkets(activeMarkets);
@@ -73,7 +76,6 @@ module.exports = async function handler(req, res) {
       };
     }
 
-    // If it looks like a slug, try direct event lookup first
     const looksLikeSlug = /^[a-z0-9-]+$/.test(query) && query.includes('-');
     if (looksLikeSlug) {
       const eventRes = await fetch(`https://gamma-api.polymarket.com/events/slug/${encodeURIComponent(query)}`);
@@ -89,7 +91,6 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Fallback: regular search
     const gammaRes = await fetch(
       `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(query)}`
     );
