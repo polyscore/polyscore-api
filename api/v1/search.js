@@ -49,6 +49,29 @@ function sortMarkets(markets) {
           return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
         });
       }
+
+      // Check for arrow groups (↓ cuts / ↑ hikes)
+      var hasArrows = markets.some(function(m) {
+        var t = (m.groupItemTitle || '').toString();
+        return t.indexOf('↓') !== -1 || t.indexOf('↑') !== -1;
+      });
+      if (hasArrows) {
+        var downs = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('↓') !== -1; });
+        var ups = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('↑') !== -1; });
+        var others = markets.filter(function(m) {
+          var t = m.groupItemTitle || '';
+          return t.indexOf('↓') === -1 && t.indexOf('↑') === -1;
+        });
+        var getRate = function(m) {
+          var match = (m.groupItemTitle || '').match(/([\d.]+)%/);
+          return match ? parseFloat(match[1]) : 0;
+        };
+        downs.sort(function(a, b) { return getRate(b) - getRate(a); });
+        ups.sort(function(a, b) { return getRate(a) - getRate(b); });
+        return downs.concat(ups).concat(others);
+      }
+
+      // Default: sort by YES price descending
       return markets.sort(function(a, b) {
         var aPrice = 0, bPrice = 0;
         var aRaw = a.outcomePrices;
