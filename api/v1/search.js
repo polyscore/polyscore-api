@@ -18,10 +18,10 @@ module.exports = async function handler(req, res) {
     if (!gammaRes.ok) throw new Error(`GAMMA search failed: ${gammaRes.status}`);
     const data = await gammaRes.json();
 
-    const events = (data.events || [])
-      .filter(e => e.active && !e.closed)
-      .slice(0, 20)
-      .map(event => {
+    const markets = (event.markets || [])
+  .filter(m => m.active && !m.closed)
+  .sort((a, b) => parseFloat(a.groupItemThreshold || 0) - parseFloat(b.groupItemThreshold || 0))
+  .map(m => {
         const markets = (event.markets || []).filter(m => m.active && !m.closed).map(m => {
           let outcomes = [];
           let outcomePrices = [];
