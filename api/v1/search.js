@@ -33,29 +33,30 @@ module.exports = async function handler(req, res) {
       };
     }
 
-    function sortMarkets(markets) {
-      if (markets.length <= 1) return markets;
-      var thresholds = markets.map(function(m) { return (m.groupItemThreshold || '').toString(); });
-      var allNumeric = thresholds.every(function(t) { return /^\d+\+?$/.test(t); });
-      var uniqueCount = new Set(thresholds).size;
-      if (allNumeric && uniqueCount > 1) {
-        return markets.sort(function(a, b) {
-          return parseFloat(a.groupItemThreshold) - parseFloat(b.groupItemThreshold);
-        });
-      }
-      return markets.sort(function(a, b) {
-        var aPrice = 0, bPrice = 0;
-        try {
-          var aOp = typeof a.outcomePrices === 'string' ? JSON.parse(a.outcomePrices) : (a.outcomePrices || []);
-          aPrice = parseFloat(aOp[0] || 0);
-        } catch(e) {}
-        try {
-          var bOp = typeof b.outcomePrices === 'string' ? JSON.parse(b.outcomePrices) : (b.outcomePrices || []);
-          bPrice = parseFloat(bOp[0] || 0);
-        } catch(e) {}
-        return bPrice - aPrice;
-      });
-    }
+function sortMarkets(markets) {
+  if (markets.length <= 1) return markets;
+  var titles = markets.map(function(m) { return (m.groupItemTitle || '').toString(); });
+  var allTitlesNumeric = titles.every(function(t) { return /^\d+\+?$/.test(t); });
+  if (allTitlesNumeric && new Set(titles).size > 1) {
+    return markets.sort(function(a, b) {
+      return parseFloat(a.groupItemTitle) - parseFloat(b.groupItemTitle);
+    });
+  }
+  return markets.sort(function(a, b) {
+    var aPrice = 0, bPrice = 0;
+    var aRaw = a.outcomePrices;
+    var bRaw = b.outcomePrices;
+    try {
+      if (typeof aRaw === 'string') aRaw = JSON.parse(aRaw);
+      if (Array.isArray(aRaw)) aPrice = parseFloat(aRaw[0]) || 0;
+    } catch(e) {}
+    try {
+      if (typeof bRaw === 'string') bRaw = JSON.parse(bRaw);
+      if (Array.isArray(bRaw)) bPrice = parseFloat(bRaw[0]) || 0;
+    } catch(e) {}
+    return bPrice - aPrice;
+  });
+}
 
     function formatEvent(event) {
       var activeMarkets = (event.markets || []).filter(function(m) { return m.active && !m.closed; });
