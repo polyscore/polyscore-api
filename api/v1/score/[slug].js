@@ -880,7 +880,40 @@ module.exports = async function handler(req, res) {
         blockingIssues.push({ pillar: name, score: pillar.score, warning: pillar.warning?.text || `${name} score critically low` });
       }
     }
-    const risk = blockingIssues.length > 0 ? { level: 'elevated', label: 'Blocking issues detected' } : { level: 'low', label: 'No blocking issues' };
+    // ── Dispute detection ──────────────────────────────────────
+    const umaStatus = market.umaResolutionStatus || null;
+    const isDisputed = umaStatus === 'disputed';
+    const isProposed = umaStatus === 'proposed';
+    const isUmaResolved = umaStatus === 'resolved';
+
+    let marketStatus = 'open';
+    if (market.closed) marketStatus = 'closed';
+    else if (!market.active) marketStatus = 'inactive';
+    else if (isDisputed) marketStatus = 'disputed';
+    else if (isProposed) marketStatus = 'proposed';
+
+    if (isDisputed) {
+      blockingIssues.push({
+        pillar: 'resolution',
+        score: resolution.score,
+        warning: 'This market is in dispute. The proposed resolution has been challenged — the final outcome is uncertain and your capital is locked until the dispute resolves.',
+      });
+    } else if (isProposed) {
+      // Not a blocking issue but worth noting
+      blockingIssues.push({
+        pillar: 'resolution',
+        score: resolution.score,
+        warning: 'Resolution has been proposed but is still within the challenge period. The outcome could still be disputed.',
+      });
+    }
+
+    // Parse dispute history if available
+    let disputeHistory = null;
+    if (market.umaResolutionStatuses) {
+      try { disputeHistory = JSON.parse(market.umaResolutionStatuses); } catch(e) {}
+    }
+
+    const risk = blockingIssues.length > 0 ? { level: isDisputed ? 'high' : 'elevated', label: isDisputed ? 'Market in dispute' : 'Blocking issues detected' } : { level: 'low', label: 'No blocking issues' };
 
     const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
     return res.status(200).json({
@@ -893,7 +926,9 @@ module.exports = async function handler(req, res) {
         title: market.question,
         slug: market.slug,
         conditionId: market.conditionId,
-        status: market.active ? (market.closed ? 'closed' : 'open') : 'inactive',
+        status: marketStatus,
+        umaResolutionStatus: umaStatus,
+        disputeHistory,
         image: market.image,
         description: market.description,
         resolutionSource: market.resolutionSource || null,
