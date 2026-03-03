@@ -14,42 +14,205 @@ function scoreCloseTo(value, target, tolerance) {
   return Math.round(10 - (distance / tolerance) * 9);
 }
 
+// ─── DOME API HELPERS ───────────────────────────────────────
+
+async function fetchDomeTrades(conditionId, daysBack, apiKey, maxPages) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const startTime = nowSec - (86400 * daysBack);
+  const allTrades = [];
+  let paginationKey = null;
+  let pages = 0;
+
+  while (pages < maxPages) {
+    let url = `https://api.domeapi.io/v1/polymarket/orders?condition_id=${conditionId}&start_time=${startTime}&end_time=${nowSec}&limit=1000`;
+    if (paginationKey) url += `&pagination_key=${encodeURIComponent(paginationKey)}`;
+
+    const res = await fetch(url, { headers: { 'x-api-key': apiKey } });
+    if (!res.ok) break;
+
+    const data = await res.json();
+    const orders = data.orders || [];
+    allTrades.push(...orders);
+
+    if (!data.pagination?.has_more || !data.pagination?.pagination_key) break;
+    paginationKey = data.pagination.pagination_key;
+    pages++;
+  }
+
+  return allTrades;
+}
+
+async function fetchDomeCandles(conditionId, daysBack, interval, apiKey) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const startTime = nowSec - (86400 * daysBack);
+
+  const res = await fetch(
+    `https://api.domeapi.io/v1/polymarket/candlesticks/${conditionId}?start_time=${startTime}&end_time=${nowSec}&interval=${interval}`,
+    { headers: { 'x-api-key': apiKey } }
+  );
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  if (data.candlesticks && data.candlesticks.length > 0) {
+    return data.candlesticks[0][0] || [];
+  }
+  return [];
+}
+
 // ─── LIQUIDITY PILLAR ────────────────────────────────────────
 
-function computeLiquidityMetrics(orderbook, spread, midpoint, allTrades) {
+function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, domeTrades) {
   const metrics = {};
   const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
   const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
 
-  // 1. Bid-ask spread
+  // ── 1. Bid-Ask Spread (%) ─────────────────────────────────
+  // Source: CLOB /spread + /midpoint
   const spreadValue = spread?.spread ? parseFloat(spread.spread) : null;
   let spreadPct = null;
-  if (spreadValue != null && midValue != null && midValue > 0) spreadPct = (spreadValue / midValue) * 100;
-  metrics.bidAskSpread = { value: fmt(spreadPct, 2), unit: '%', score: spreadPct != null ? (11 - scoreBetween(spreadPct, 1, 25)) : null, signal: spreadPct == null ? 'unavailable' : spreadPct < 3 ? 'good' : spreadPct < 10 ? 'neutral' : 'bad', context: spreadPct == null ? null : spreadPct < 2 ? 'Tight spread' : spreadPct < 5 ? 'Moderate' : 'Wide spread' };
+  if (spreadValue != null && midValue != null && midValue > 0) {
+    spreadPct = (spreadValue / midValue) * 100;
+  }
+  metrics.bidAskSpread = {
+    value: fmt(spreadPct, 2),
+    unit: '%',
+    score: spreadPct != null ? (11 - scoreBetween(spreadPct, 1, 25)) : null,
+    signal: spreadPct == null ? 'unavailable' : spreadPct < 3 ? 'good' : spreadPct < 10 ? 'neutral' : 'bad',
+    context: spreadPct == null ? null : spreadPct < 2 ? 'Tight spread' : spreadPct < 5 ? 'Moderate' : 'Wide spread',
+  };
 
-  // 2. Depth at 2% (PRIMARY depth metric)
-  let depthAt1 = null, depthAt2 = null, depthAt5 = null, bookImbalance = null;
+  // ── 2. Depth at 2% ───────────────────────────────────────
+  // Source: CLOB /book + /midpoint
+  let depthAt2 = null, bookImbalance = null;
   if (orderbook && midValue) {
     const bids = orderbook.bids || [], asks = orderbook.asks || [];
-    let bidD1 = 0, askD1 = 0, bidD2 = 0, askD2 = 0, bidD5 = 0, askD5 = 0, totalBid = 0, totalAsk = 0;
-    for (const bid of bids) { const p = parseFloat(bid.price), s = parseFloat(bid.size), d = ((midValue - p) / midValue) * 100; totalBid += p * s; if (d <= 1) bidD1 += p * s; if (d <= 2) bidD2 += p * s; if (d <= 5) bidD5 += p * s; }
-    for (const ask of asks) { const p = parseFloat(ask.price), s = parseFloat(ask.size), d = ((p - midValue) / midValue) * 100; totalAsk += p * s; if (d <= 1) askD1 += p * s; if (d <= 2) askD2 += p * s; if (d <= 5) askD5 += p * s; }
-    depthAt1 = bidD1 + askD1; depthAt2 = bidD2 + askD2; depthAt5 = bidD5 + askD5;
-    bookImbalance = (totalBid + totalAsk) > 0 ? totalBid / (totalBid + totalAsk) : null;
+    let bidD2 = 0, askD2 = 0;
+    for (const bid of bids) {
+      const p = parseFloat(bid.price), s = parseFloat(bid.size);
+      const d = ((midValue - p) / midValue) * 100;
+      if (d <= 2) bidD2 += p * s;
+    }
+    for (const ask of asks) {
+      const p = parseFloat(ask.price), s = parseFloat(ask.size);
+      const d = ((p - midValue) / midValue) * 100;
+      if (d <= 2) askD2 += p * s;
+    }
+    depthAt2 = bidD2 + askD2;
+    bookImbalance = (bidD2 + askD2) > 0 ? bidD2 / (bidD2 + askD2) : null;
   }
-  metrics.depthAt2Pct = { value: fmt(depthAt2, 2), unit: 'USD', score: scoreBetween(depthAt2, 1000, 100000), signal: depthAt2 == null ? 'unavailable' : depthAt2 > 50000 ? 'good' : depthAt2 > 5000 ? 'neutral' : 'bad', context: depthAt2 == null ? null : depthAt2 > 50000 ? 'Strong depth' : depthAt2 > 5000 ? 'Moderate depth' : 'Thin orderbook' };
-  metrics.depthAt1Pct = { value: fmt(depthAt1, 2), unit: 'USD', score: scoreBetween(depthAt1, 500, 50000), signal: depthAt1 == null ? 'unavailable' : depthAt1 > 20000 ? 'good' : depthAt1 > 2000 ? 'neutral' : 'bad', context: null };
-  metrics.depthAt5Pct = { value: fmt(depthAt5, 2), unit: 'USD', score: scoreBetween(depthAt5, 2000, 200000), signal: depthAt5 == null ? 'unavailable' : depthAt5 > 50000 ? 'good' : depthAt5 > 10000 ? 'neutral' : 'bad', context: null };
+  metrics.depthAt2Pct = {
+    value: fmt(depthAt2, 2),
+    unit: 'USD',
+    score: scoreBetween(depthAt2, 1000, 100000),
+    signal: depthAt2 == null ? 'unavailable' : depthAt2 > 50000 ? 'good' : depthAt2 > 5000 ? 'neutral' : 'bad',
+    context: depthAt2 == null ? null : depthAt2 > 50000 ? 'Strong depth' : depthAt2 > 5000 ? 'Moderate depth' : 'Thin orderbook',
+  };
 
-  // 3. Kyle's Lambda — price impact per dollar traded
+  // ── 3. Book Imbalance (within 2% of midpoint) ────────────
+  // Source: CLOB /book
+  metrics.bookImbalance = {
+    value: fmt(bookImbalance, 3),
+    unit: 'ratio',
+    score: scoreCloseTo(bookImbalance, 0.5, 0.5),
+    signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad',
+    context: bookImbalance == null ? null
+      : Math.abs(bookImbalance - 0.5) < 0.15 ? 'Balanced book'
+      : bookImbalance < 0.35 ? 'No buyers near price — hard to exit'
+      : bookImbalance > 0.65 ? 'No sellers near price — hard to enter'
+      : 'Slightly imbalanced',
+  };
+
+  // ── 4. Spread as % of Edge ───────────────────────────────
+  // Source: CLOB /spread + /midpoint
+  let spreadEdgePct = null;
+  if (spreadValue != null && midValue != null && midValue > 0 && midValue < 1) {
+    const edge = Math.min(midValue, 1 - midValue);
+    if (edge > 0) spreadEdgePct = (spreadValue / edge) * 100;
+  }
+  metrics.spreadEdgePct = {
+    value: fmt(spreadEdgePct, 1),
+    unit: '%',
+    score: spreadEdgePct != null ? (11 - scoreBetween(spreadEdgePct, 5, 80)) : null,
+    signal: spreadEdgePct == null ? 'unavailable' : spreadEdgePct < 10 ? 'good' : spreadEdgePct < 30 ? 'neutral' : 'bad',
+    context: spreadEdgePct == null ? null
+      : spreadEdgePct < 10 ? 'Low entry cost'
+      : spreadEdgePct < 30 ? 'Moderate — spread eats into profits'
+      : 'Spread consumes ' + fmt(spreadEdgePct, 0) + '% of your potential profit',
+  };
+
+  // ── 5. Volume 24h ────────────────────────────────────────
+  // Source: Dome /candlesticks (1d interval, 14 days)
+  // Dome candles: volume is in raw shares, price.mean_dollars is avg price
+  // Dollar volume = volume * mean_dollars for each candle
+  let volume24h = null;
+  if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length > 0) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oneDayAgo = nowSec - 86400;
+    let vol = 0;
+    for (const candle of domeCandles14d) {
+      const ts = candle.end_period_ts || 0;
+      if (ts >= oneDayAgo) {
+        const meanPrice = parseFloat(candle.price?.mean_dollars || 0);
+        const shares = parseFloat(candle.volume || 0);
+        vol += (shares / 1000000) * meanPrice; // shares are raw (×1M), price is decimal
+      }
+    }
+    volume24h = vol;
+  }
+  metrics.volume24h = {
+    value: fmt(volume24h, 2),
+    unit: 'USD',
+    score: scoreBetween(volume24h, 1000, 500000),
+    signal: volume24h == null ? 'unavailable' : volume24h > 100000 ? 'good' : volume24h > 10000 ? 'neutral' : 'bad',
+    context: volume24h == null ? null
+      : volume24h > 100000 ? 'Active market'
+      : volume24h > 10000 ? 'Moderate activity'
+      : volume24h > 0 ? 'Low activity'
+      : 'No trades in 24 hours',
+  };
+
+  // ── 6. Volume Trend (7d vs prior 7d) ─────────────────────
+  // Source: Dome /candlesticks (1d interval, 14 days)
+  let volumeTrend = null;
+  if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length > 0) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sevenDaysAgo = nowSec - 86400 * 7;
+    const fourteenDaysAgo = nowSec - 86400 * 14;
+    let vol7d = 0, volPrior7d = 0;
+    for (const candle of domeCandles14d) {
+      const ts = candle.end_period_ts || 0;
+      const meanPrice = parseFloat(candle.price?.mean_dollars || 0);
+      const shares = parseFloat(candle.volume || 0);
+      const dollarVol = (shares / 1000000) * meanPrice;
+      if (ts >= sevenDaysAgo) vol7d += dollarVol;
+      else if (ts >= fourteenDaysAgo) volPrior7d += dollarVol;
+    }
+    if (volPrior7d > 0) volumeTrend = ((vol7d - volPrior7d) / volPrior7d) * 100;
+    else if (vol7d > 0) volumeTrend = 100;
+  }
+  metrics.volumeTrend = {
+    value: fmt(volumeTrend, 1),
+    unit: '%',
+    score: volumeTrend != null ? scoreBetween(volumeTrend, -50, 100) : null,
+    signal: volumeTrend == null ? 'unavailable' : volumeTrend > 10 ? 'good' : volumeTrend > -10 ? 'neutral' : 'bad',
+    context: volumeTrend == null ? null
+      : volumeTrend > 20 ? 'Growing interest'
+      : volumeTrend > -10 ? 'Stable activity'
+      : 'Declining — market losing attention',
+  };
+
+  // ── 7. Kyle's Lambda ─────────────────────────────────────
+  // Source: Dome /orders (7 days, paginated)
+  // Dome trades: price is decimal (0.92), shares_normalized is shares (30 = 30 shares)
+  // Trade value in dollars = shares_normalized * price
   let kyleLambda = null;
-  if (allTrades && allTrades.length >= 10) {
-    const sorted = [...allTrades].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  if (domeTrades && domeTrades.length >= 10) {
+    const sorted = [...domeTrades].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     let totalLambda = 0, count = 0;
     for (let i = 1; i < sorted.length; i++) {
       const prevPrice = parseFloat(sorted[i-1].price || 0);
       const currPrice = parseFloat(sorted[i].price || 0);
-      const tradeValue = parseFloat(sorted[i].size || 0) * currPrice;
+      const tradeValue = parseFloat(sorted[i].shares_normalized || 0) * currPrice;
       if (tradeValue > 0.01 && prevPrice > 0) {
         totalLambda += Math.abs(currPrice - prevPrice) / tradeValue;
         count++;
@@ -57,96 +220,131 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, allTrades) {
     }
     if (count > 0) kyleLambda = totalLambda / count;
   }
-  metrics.kyleLambda = { value: fmt(kyleLambda, 6), unit: 'λ', score: kyleLambda != null ? (11 - scoreBetween(kyleLambda, 0.0001, 0.01)) : null, signal: kyleLambda == null ? 'unavailable' : kyleLambda < 0.001 ? 'good' : kyleLambda < 0.005 ? 'neutral' : 'bad', context: kyleLambda == null ? null : kyleLambda < 0.001 ? 'Low price impact' : kyleLambda < 0.005 ? 'Moderate impact' : 'High price impact' };
+  metrics.kyleLambda = {
+    value: fmt(kyleLambda, 6),
+    unit: 'λ',
+    score: kyleLambda != null ? (11 - scoreBetween(kyleLambda, 0.0001, 0.01)) : null,
+    signal: kyleLambda == null ? 'unavailable' : kyleLambda < 0.001 ? 'good' : kyleLambda < 0.005 ? 'neutral' : 'bad',
+    context: kyleLambda == null ? null
+      : kyleLambda < 0.001 ? 'Stable — trades absorbed without moving price'
+      : kyleLambda < 0.005 ? 'Moderate price impact'
+      : 'Fragile — even small trades move the price',
+  };
 
-  // 4. Slippage estimate ($5K order) — walk the ask side of the book
-  let slippage5k = null;
-  if (orderbook && midValue) {
-    const asks = [...(orderbook.asks || [])].sort((a, b) => parseFloat(a.price) - parseFloat(b.price));
-    let remaining = 5000, weightedPrice = 0, filledQty = 0;
-    for (const ask of asks) {
-      if (remaining <= 0) break;
-      const p = parseFloat(ask.price), s = parseFloat(ask.size);
-      const dollarAvail = p * s;
-      const dollarFill = Math.min(remaining, dollarAvail);
-      const qtyFill = dollarFill / p;
-      weightedPrice += p * qtyFill;
-      filledQty += qtyFill;
-      remaining -= dollarFill;
-    }
-    if (filledQty > 0 && midValue > 0) {
-      const avgPrice = weightedPrice / filledQty;
-      slippage5k = ((avgPrice - midValue) / midValue) * 100;
-    }
-  }
-  metrics.slippage5k = { value: fmt(slippage5k, 2), unit: '%', score: slippage5k != null ? (11 - scoreBetween(slippage5k, 0.5, 10)) : null, signal: slippage5k == null ? 'unavailable' : slippage5k < 1 ? 'good' : slippage5k < 5 ? 'neutral' : 'bad', context: slippage5k == null ? null : slippage5k < 1 ? 'Minimal impact' : slippage5k < 5 ? 'Moderate slippage' : 'Heavy slippage — use limit orders' };
-
-  // 5. Amihud Illiquidity Ratio — avg(|daily return| / daily volume)
-  let amihud = null;
-  if (allTrades && allTrades.length >= 20) {
-    const nowSec = Date.now() / 1000;
-    const sevenDaysAgo = nowSec - 86400 * 7;
-    const dailyData = {};
-    for (const trade of allTrades) {
+  // ── 8. Time Since Last Trade ──────────────────────────────
+  // Source: Dome /orders (most recent trade timestamp)
+  let timeSinceLastTrade = null;
+  if (domeTrades && domeTrades.length > 0) {
+    let maxTs = 0;
+    for (const trade of domeTrades) {
       const ts = trade.timestamp || 0;
-      if (ts < sevenDaysAgo) continue;
-      const day = Math.floor(ts / 86400);
-      if (!dailyData[day]) dailyData[day] = { prices: [], volume: 0 };
-      dailyData[day].prices.push(parseFloat(trade.price || 0));
-      dailyData[day].volume += parseFloat(trade.size || 0) * parseFloat(trade.price || 0);
+      if (ts > maxTs) maxTs = ts;
     }
-    const dayKeys = Object.keys(dailyData).sort();
-    if (dayKeys.length >= 2) {
-      let totalAmihud = 0, count = 0;
-      for (let i = 1; i < dayKeys.length; i++) {
-        const prev = dailyData[dayKeys[i-1]], curr = dailyData[dayKeys[i]];
-        const prevAvg = prev.prices.reduce((a,b) => a+b, 0) / prev.prices.length;
-        const currAvg = curr.prices.reduce((a,b) => a+b, 0) / curr.prices.length;
-        if (prevAvg > 0 && curr.volume > 0) {
-          totalAmihud += Math.abs((currAvg - prevAvg) / prevAvg) / curr.volume;
-          count++;
-        }
-      }
-      if (count > 0) amihud = (totalAmihud / count) * 1e6; // scale for readability
+    if (maxTs > 0) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      timeSinceLastTrade = (nowSec - maxTs) / 3600;
     }
   }
-  metrics.amihudIlliquidity = { value: fmt(amihud, 2), unit: '×10⁶', score: amihud != null ? (11 - scoreBetween(amihud, 0.01, 5)) : null, signal: amihud == null ? 'unavailable' : amihud < 0.5 ? 'good' : amihud < 2 ? 'neutral' : 'bad', context: amihud == null ? null : amihud < 0.5 ? 'Liquid market' : amihud < 2 ? 'Moderate liquidity' : 'Illiquid' };
+  metrics.timeSinceLastTrade = {
+    value: fmt(timeSinceLastTrade, 1),
+    unit: 'hours',
+    score: timeSinceLastTrade != null ? (11 - scoreBetween(timeSinceLastTrade, 1, 168)) : null,
+    signal: timeSinceLastTrade == null ? 'unavailable' : timeSinceLastTrade < 6 ? 'good' : timeSinceLastTrade < 48 ? 'neutral' : 'bad',
+    context: timeSinceLastTrade == null ? null
+      : timeSinceLastTrade < 1 ? 'Traded minutes ago'
+      : timeSinceLastTrade < 6 ? 'Recent activity'
+      : timeSinceLastTrade < 24 ? 'Last trade ' + fmt(timeSinceLastTrade, 0) + ' hours ago'
+      : timeSinceLastTrade < 168 ? 'Last trade ' + fmt(timeSinceLastTrade / 24, 1) + ' days ago'
+      : 'No trades in over a week',
+  };
 
-  // 6. Book Imbalance
-  metrics.bookImbalance = { value: fmt(bookImbalance, 3), unit: 'ratio', score: scoreCloseTo(bookImbalance, 0.5, 0.5), signal: bookImbalance == null ? 'unavailable' : Math.abs(bookImbalance - 0.5) < 0.15 ? 'good' : Math.abs(bookImbalance - 0.5) < 0.3 ? 'neutral' : 'bad', context: bookImbalance == null ? null : Math.abs(bookImbalance - 0.5) < 0.15 ? 'Balanced' : bookImbalance < 0.35 ? 'Ask-heavy' : bookImbalance > 0.65 ? 'Bid-heavy' : 'Slightly imbalanced' };
-
-  // 7-9. Volume metrics
-  let volume24h = null, volume7d = null, volumeTrend = null;
-  if (allTrades && allTrades.length > 0) {
-    const now = Date.now() / 1000;
-    let vol24 = 0, vol7d = 0, volPrior7d = 0;
-    for (const trade of allTrades) {
-      const ts = trade.timestamp || 0, value = parseFloat(trade.size || 0) * parseFloat(trade.price || 0);
-      if (ts >= now - 86400) vol24 += value;
-      if (ts >= now - 86400 * 7) vol7d += value;
-      if (ts >= now - 86400 * 14 && ts < now - 86400 * 7) volPrior7d += value;
-    }
-    volume24h = vol24; volume7d = vol7d;
-    if (volPrior7d > 0) volumeTrend = ((vol7d - volPrior7d) / volPrior7d) * 100;
-    else if (vol7d > 0) volumeTrend = 100;
-  }
-  metrics.volume24h = { value: fmt(volume24h, 2), unit: 'USD', score: scoreBetween(volume24h, 1000, 500000), signal: volume24h == null ? 'unavailable' : volume24h > 100000 ? 'good' : volume24h > 10000 ? 'neutral' : 'bad', context: volume24h == null ? null : volume24h > 100000 ? 'Active trading' : volume24h > 10000 ? 'Moderate activity' : 'Low activity' };
-  metrics.volume7d = { value: fmt(volume7d, 2), unit: 'USD', score: scoreBetween(volume7d, 5000, 2000000), signal: volume7d == null ? 'unavailable' : volume7d > 500000 ? 'good' : volume7d > 50000 ? 'neutral' : 'bad', context: null };
-  metrics.volumeTrend = { value: fmt(volumeTrend, 1), unit: '%', score: volumeTrend != null ? scoreBetween(volumeTrend, -50, 100) : null, signal: volumeTrend == null ? 'unavailable' : volumeTrend > 10 ? 'good' : volumeTrend > -10 ? 'neutral' : 'bad', context: volumeTrend == null ? null : volumeTrend > 20 ? 'Growing interest' : volumeTrend > -10 ? 'Stable' : 'Declining' };
-
-  // Pillar score — weight the primary metrics higher
-  const primaryMetrics = ['bidAskSpread', 'depthAt2Pct', 'kyleLambda', 'slippage5k', 'bookImbalance', 'volume24h', 'volumeTrend'];
-  const scores = primaryMetrics.map(k => metrics[k]?.score).filter(s => s != null);
+  // ── PILLAR SCORE ──────────────────────────────────────────
+  const scoredMetrics = ['bidAskSpread', 'depthAt2Pct', 'bookImbalance', 'spreadEdgePct', 'volume24h', 'volumeTrend', 'kyleLambda', 'timeSinceLastTrade'];
+  const scores = scoredMetrics.map(k => metrics[k]?.score).filter(s => s != null);
   const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)) : null;
 
-  // Warning
-  let warning = null;
-  if (slippage5k != null && slippage5k > 5) warning = { type: 'danger', text: `Heavy slippage. A $5K order would move the price by ${fmt(slippage5k, 1)}%. Consider smaller positions or limit orders.` };
-  else if (depthAt2 != null && depthAt2 < 5000) warning = { type: 'warning', text: `Thin orderbook. Only $${Math.round(depthAt2).toLocaleString()} within 2% of midpoint.` };
-  else if (bookImbalance != null && Math.abs(bookImbalance - 0.5) > 0.3) warning = { type: 'warning', text: `Imbalanced book. ${bookImbalance < 0.35 ? 'Sellers heavily outweigh buyers' : 'Buyers heavily outweigh sellers'}.` };
-  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: 'Good liquidity. Tight spreads and adequate depth for most position sizes.' };
+  // ── WARNINGS ──────────────────────────────────────────────
+  const warnings = [];
 
-  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 5 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 12, warning, metrics };
+  const isStale = timeSinceLastTrade != null && timeSinceLastTrade > 48;
+  const isThin = depthAt2 != null && depthAt2 < 5000;
+  const isWideSpread = spreadPct != null && spreadPct > 10;
+  const isDeclining = volumeTrend != null && volumeTrend < -40;
+  const isFragile = kyleLambda != null && kyleLambda > 0.005;
+  const isNoBuyers = bookImbalance != null && bookImbalance < 0.2;
+  const isNoSellers = bookImbalance != null && bookImbalance > 0.8;
+  const isExpensiveEdge = spreadEdgePct != null && spreadEdgePct > 40;
+  const isDead = volume24h != null && volume24h === 0;
+
+  // Combined warnings (most severe first)
+  if (isStale && isThin && isDeclining) {
+    warnings.push({ type: 'danger', text: 'Ghost market — last trade ' + fmt(timeSinceLastTrade / 24, 1) + ' days ago, only $' + Math.round(depthAt2).toLocaleString() + ' in the book, and activity down ' + fmt(Math.abs(volumeTrend), 0) + '%. This market exists on paper only.' });
+  }
+  else if (isDeclining && (isStale || isDead)) {
+    warnings.push({ type: 'danger', text: 'Dying market — volume down ' + fmt(Math.abs(volumeTrend), 0) + '% and ' + (isDead ? 'no trades today' : 'last trade ' + fmt(timeSinceLastTrade / 24, 1) + ' days ago') + '. You probably can\'t exit at a fair price.' });
+  }
+  else if (isNoBuyers && isDeclining) {
+    warnings.push({ type: 'danger', text: 'Trapped — no buyers near the price and activity declining. If you enter, you may not be able to get out.' });
+  }
+  else if (isStale && isWideSpread) {
+    warnings.push({ type: 'danger', text: 'Stale and expensive — last trade ' + fmt(timeSinceLastTrade / 24, 1) + ' days ago with a ' + fmt(spreadPct, 1) + '% spread. The price you see is probably not what you\'ll get.' });
+  }
+  else if (!isWideSpread && isThin) {
+    warnings.push({ type: 'warning', text: 'Price mirage — spread looks tight but only $' + Math.round(depthAt2).toLocaleString() + ' behind it. One order will blow through the book.' });
+  }
+  else if (isFragile && isThin) {
+    warnings.push({ type: 'warning', text: 'Fragile and thin — small trades are moving the price and there\'s little depth. This price is noise, not signal.' });
+  }
+
+  // Single-metric warnings (only if no combined warning fired)
+  if (warnings.length === 0) {
+    if (isExpensiveEdge) {
+      const edgeStr = midValue != null ? 'Market at ' + Math.round(midValue * 100) + '¢' : 'Near-certain market';
+      warnings.push({ type: 'warning', text: edgeStr + ' — the spread consumes ' + fmt(spreadEdgePct, 0) + '% of your potential profit. The math may not work.' });
+    }
+    else if (isWideSpread) {
+      warnings.push({ type: 'warning', text: 'Wide spread — you\'ll pay ' + fmt(spreadPct, 1) + '% just to enter this trade.' });
+    }
+    else if (isNoSellers) {
+      warnings.push({ type: 'warning', text: 'No sellers near the price — buying may push the price up significantly.' });
+    }
+    else if (isNoBuyers) {
+      warnings.push({ type: 'warning', text: 'No buyers near the price — you may struggle to exit your position.' });
+    }
+    else if (isDead) {
+      warnings.push({ type: 'warning', text: 'No trades in the last 24 hours — this price may be stale and unreliable.' });
+    }
+    else if (isStale) {
+      warnings.push({ type: 'warning', text: 'Last trade was ' + fmt(timeSinceLastTrade / 24, 1) + ' days ago — the current price may not reflect reality.' });
+    }
+    else if (isDeclining) {
+      warnings.push({ type: 'warning', text: 'Activity dropped ' + fmt(Math.abs(volumeTrend), 0) + '% this week — this market is losing attention.' });
+    }
+    else if (isThin) {
+      warnings.push({ type: 'warning', text: 'Thin orderbook — only $' + Math.round(depthAt2).toLocaleString() + ' within 2% of the price.' });
+    }
+    else if (isFragile) {
+      warnings.push({ type: 'warning', text: 'Fragile market — even small trades are moving the price significantly.' });
+    }
+  }
+
+  // Positive signal
+  if (warnings.length === 0 && pillarScore != null && pillarScore >= 7) {
+    warnings.push({ type: 'info', text: 'Healthy liquidity — tight spread, good depth, active trading. Low-cost entry with reliable exit.' });
+  }
+
+  const warning = warnings.length > 0 ? warnings[0] : null;
+
+  return {
+    score: pillarScore,
+    status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable',
+    confidence: scores.length >= 6 ? 'high' : scores.length >= 4 ? 'medium' : 'low',
+    metricsComputed: scores.length,
+    metricsTotal: 8,
+    warning,
+    warnings,
+    metrics,
+  };
 }
 
 // ─── DISCOVERY PILLAR ────────────────────────────────────────
@@ -509,26 +707,29 @@ module.exports = async function handler(req, res) {
 
     const startTime = Date.now();
 
-    // Fetch all data in parallel — including 2 batches of trades and the correct OI endpoint
-    const results = await Promise.allSettled([
-      fetch(`https://clob.polymarket.com/book?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://clob.polymarket.com/spread?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://clob.polymarket.com/midpoint?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1d&fidelity=30`).then(r => r.ok ? r.json() : null),
-      fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1h&fidelity=24`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/holders?market=${conditionId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/oi?market=${conditionId}`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/trades?market=${conditionId}&limit=1000&offset=0`).then(r => r.ok ? r.json() : null),
-      fetch(`https://data-api.polymarket.com/trades?market=${conditionId}&limit=1000&offset=1000`).then(r => r.ok ? r.json() : null),
-    ]);
+    // Fetch all data in parallel
+    const DOME_API_KEY = process.env.DOME_API_KEY;
+const startTime = Date.now();
 
-    const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    const get = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
+const results = await Promise.allSettled([
+  fetch(`https://clob.polymarket.com/book?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),           // 0
+  fetch(`https://clob.polymarket.com/spread?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),         // 1
+  fetch(`https://clob.polymarket.com/midpoint?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),       // 2
+  fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1d&fidelity=30`).then(r => r.ok ? r.json() : null),  // 3
+  fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1h&fidelity=24`).then(r => r.ok ? r.json() : null),  // 4
+  fetch(`https://data-api.polymarket.com/holders?market=${conditionId}`).then(r => r.ok ? r.json() : null),         // 5
+  fetch(`https://data-api.polymarket.com/oi?market=${conditionId}`).then(r => r.ok ? r.json() : null),              // 6
+  fetchDomeCandles(conditionId, 14, 1440, DOME_API_KEY),  // 7
+  fetchDomeTrades(conditionId, 7, DOME_API_KEY, 3),       // 8
+]);
 
     const orderbook = get(0), spread = get(1), midpoint = get(2);
-    const priceHistory30d = get(3), priceHistory24h = get(4);
-    const holders = get(5), openInterest = get(6);
-    const trades1 = get(7), trades2 = get(8);
+const priceHistory30d = get(3), priceHistory24h = get(4);
+const holders = get(5), openInterest = get(6);
+const domeCandles14d = get(7);
+const domeTrades = get(8);
+
+const allTrades = Array.isArray(domeTrades) ? domeTrades : [];
 
     // Merge trade batches
     const allTrades = [
@@ -537,7 +738,7 @@ module.exports = async function handler(req, res) {
     ];
 
     // Compute all 5 pillars
-    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, allTrades);
+    const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, domeTrades);
     const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h);
     const participation = computeParticipationMetrics(holders, allTrades);
     const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades, orderbook, midpoint);
