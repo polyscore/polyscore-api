@@ -193,7 +193,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
       : 'Declining — market losing attention',
   };
 
-  // 7. Kyle's Lambda (Dome trades — filtered to trades > $50 to reduce noise)
+  // 7. Kyle's Lambda (Dome trades — filtered to trades > $50)
   let kyleLambda = null;
   if (domeTrades && domeTrades.length >= 10) {
     const minTradeValue = 50;
@@ -266,7 +266,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
   const isThin = depthAt2 != null && depthAt2 < 5000;
   const isWideSpread = spreadPct != null && spreadPct > 10;
   const isDeclining = volumeTrend != null && volumeTrend < -40;
-  const isFragile = kyleLambda != null && kyleLambda > 0.005;
+  const isFragile = kyleLambda != null && kyleLambda > 0.002;
   const isNoBuyers = bookImbalance != null && bookImbalance < 0.2;
   const isNoSellers = bookImbalance != null && bookImbalance > 0.8;
   const isExpensiveEdge = spreadEdgePct != null && spreadEdgePct > 40;
@@ -325,77 +325,6 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
     warnings,
     metrics,
   };
-}
-
-// ─── DISCOVERY PILLAR ────────────────────────────────────────
-
-function computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h) {
-  const metrics = {};
-  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
-  const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
-  let history = [];
-  if (priceHistory30d) { const raw = Array.isArray(priceHistory30d.history) ? priceHistory30d.history : Array.isArray(priceHistory30d) ? priceHistory30d : []; history = [...raw].sort((a, b) => (a.t || 0) - (b.t || 0)); }
-
-  metrics.currentPrice = { value: midValue, unit: 'probability', score: null, signal: midValue == null ? 'unavailable' : 'neutral', context: midValue != null ? `${Math.round(midValue * 100)}¢ YES` : null };
-
-  let priceChange24h = null;
-  if (history.length >= 2 && midValue != null) { const prior = history[history.length - 2]?.p; if (prior != null && prior > 0) priceChange24h = ((midValue - prior) / prior) * 100; }
-  metrics.priceChange24h = { value: fmt(priceChange24h, 2), unit: '%', score: null, signal: priceChange24h == null ? 'unavailable' : Math.abs(priceChange24h) > 10 ? 'warn' : 'neutral', context: priceChange24h == null ? null : Math.abs(priceChange24h) < 1 ? 'Flat' : priceChange24h > 0 ? 'Up' : 'Down' };
-
-  const last7 = history.slice(-7);
-  let low7d = null, high7d = null;
-  if (last7.length > 0) { const prices = last7.map(c => c.p).filter(p => p != null); if (prices.length > 0) { low7d = Math.min(...prices); high7d = Math.max(...prices); } }
-  metrics.priceRange7d = { value: low7d != null ? [fmt(low7d, 3), fmt(high7d, 3)] : null, unit: 'range', score: null, signal: low7d == null ? 'unavailable' : 'neutral', context: low7d != null ? `${fmt(low7d * 100, 1)}¢ – ${fmt(high7d * 100, 1)}¢` : null };
-
-  let vol24h = null;
-  let hourly = [];
-  if (priceHistory24h) { const raw = Array.isArray(priceHistory24h.history) ? priceHistory24h.history : Array.isArray(priceHistory24h) ? priceHistory24h : []; hourly = [...raw].sort((a, b) => (a.t || 0) - (b.t || 0)); }
-  if (hourly.length >= 3) {
-    const prices = hourly.map(c => c.p).filter(p => p != null);
-    const returns = [];
-    for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); }
-    if (returns.length >= 2) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length; vol24h = Math.sqrt(variance) * 100; }
-  }
-  metrics.volatility24h = { value: fmt(vol24h, 2), unit: '%', score: vol24h != null ? scoreCloseTo(vol24h, 4, 30) : null, signal: vol24h == null ? 'unavailable' : vol24h > 2 && vol24h < 10 ? 'good' : vol24h < 1 ? 'neutral' : 'warn', context: vol24h == null ? null : vol24h < 2 ? 'Stable' : vol24h < 10 ? 'Normal range' : 'Volatile' };
-
-  let realizedVol7d = null;
-  if (last7.length >= 3) { const prices = last7.map(c => c.p).filter(p => p != null); const returns = []; for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); } if (returns.length >= 2) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length; realizedVol7d = Math.sqrt(variance) * 100; } }
-  metrics.realizedVol7d = { value: fmt(realizedVol7d, 2), unit: '%', score: realizedVol7d != null ? scoreCloseTo(realizedVol7d, 6, 30) : null, signal: realizedVol7d == null ? 'unavailable' : realizedVol7d > 2 && realizedVol7d < 15 ? 'good' : realizedVol7d < 1 ? 'neutral' : 'warn', context: realizedVol7d == null ? null : realizedVol7d < 2 ? 'Very stable' : realizedVol7d < 10 ? 'Normal range' : 'High volatility' };
-
-  let momentum7d = null;
-  if (last7.length >= 2 && midValue != null) { const firstPrice = last7[0]?.p; if (firstPrice != null) momentum7d = (midValue - firstPrice) * 100; }
-  metrics.priceMomentum = { value: fmt(momentum7d, 1), unit: '¢', score: null, signal: momentum7d == null ? 'unavailable' : 'neutral', context: momentum7d == null ? null : Math.abs(momentum7d) < 1 ? 'Flat' : momentum7d > 0 ? `+${fmt(momentum7d, 1)}¢ uptrend` : `${fmt(momentum7d, 1)}¢ downtrend` };
-
-  let infoRatio = null;
-  if (history.length >= 5) {
-    const prices = history.map(c => c.p).filter(p => p != null);
-    const returns = [];
-    for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); }
-    if (returns.length >= 3) {
-      const mean = returns.reduce((a,b) => a+b, 0) / returns.length;
-      const std = Math.sqrt(returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length);
-      if (std > 0) infoRatio = Math.abs(mean) / std;
-    }
-  }
-  metrics.informationRatio = { value: fmt(infoRatio, 3), unit: 'ratio', score: infoRatio != null ? scoreBetween(infoRatio, 0.05, 1.5) : null, signal: infoRatio == null ? 'unavailable' : infoRatio > 0.5 ? 'good' : infoRatio > 0.1 ? 'neutral' : 'bad', context: infoRatio == null ? null : infoRatio > 0.5 ? 'Good signal-to-noise' : infoRatio > 0.1 ? 'Moderate signal' : 'Noisy' };
-
-  let autocorrelation = null;
-  if (history.length >= 5) { const prices = history.map(c => c.p).filter(p => p != null); const returns = []; for (let i = 1; i < prices.length; i++) { if (prices[i-1] > 0) returns.push((prices[i] - prices[i-1]) / prices[i-1]); } if (returns.length >= 4) { const mean = returns.reduce((a,b) => a+b, 0) / returns.length; let num = 0, den = 0; for (let i = 1; i < returns.length; i++) num += (returns[i] - mean) * (returns[i-1] - mean); for (let i = 0; i < returns.length; i++) den += Math.pow(returns[i] - mean, 2); if (den > 0) autocorrelation = num / den; } }
-  metrics.autocorrelation = { value: fmt(autocorrelation, 3), unit: 'corr', score: autocorrelation != null ? scoreCloseTo(autocorrelation, 0, 1) : null, signal: autocorrelation == null ? 'unavailable' : Math.abs(autocorrelation) < 0.2 ? 'good' : Math.abs(autocorrelation) < 0.5 ? 'neutral' : 'warn', context: autocorrelation == null ? null : Math.abs(autocorrelation) < 0.2 ? 'Low predictability' : 'Trending pattern detected' };
-
-  let priceEfficiency = null;
-  if (metrics.autocorrelation.score != null && metrics.realizedVol7d.score != null) priceEfficiency = parseFloat((metrics.autocorrelation.score * 0.6 + metrics.realizedVol7d.score * 0.4).toFixed(1));
-  metrics.priceEfficiency = { value: priceEfficiency, unit: '/10', score: priceEfficiency != null ? Math.round(priceEfficiency) : null, signal: priceEfficiency == null ? 'unavailable' : priceEfficiency >= 7 ? 'good' : priceEfficiency >= 4 ? 'neutral' : 'bad', context: priceEfficiency == null ? null : priceEfficiency >= 7 ? 'Efficient price discovery' : 'Potential inefficiency' };
-
-  const scorable = ['volatility24h', 'realizedVol7d', 'informationRatio', 'autocorrelation', 'priceEfficiency'];
-  const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
-
-  let warning = null;
-  if (autocorrelation != null && Math.abs(autocorrelation) > 0.4) warning = { type: 'warning', text: 'High autocorrelation. Price may be trending rather than reflecting new information.' };
-  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: 'Efficient price discovery. Price changes appear driven by genuine information.' };
-
-  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, metrics };
 }
 
 // ─── PARTICIPATION PILLAR ────────────────────────────────────
@@ -474,78 +403,6 @@ function computeParticipationMetrics(holders, allTrades) {
   else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: `Broad participation with ${walletCount} wallets and ${fmt(retailRatio, 0)}% small trades.` };
 
   return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, metrics };
-}
-
-// ─── MATURITY PILLAR ─────────────────────────────────────────
-
-function computeMaturityMetrics(gammaMarket, priceHistory30d, allTrades, orderbook, midpoint) {
-  const metrics = {};
-  const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
-  const now = new Date();
-  const midValue = midpoint?.mid ? parseFloat(midpoint.mid) : null;
-
-  const mktStartTime = gammaMarket.startDate || gammaMarket.createdAt;
-  let marketAge = null;
-  if (mktStartTime) marketAge = Math.floor((now - new Date(mktStartTime)) / (1000 * 60 * 60 * 24));
-  metrics.marketAge = { value: marketAge, unit: 'days', score: scoreBetween(marketAge, 1, 180), signal: marketAge == null ? 'unavailable' : marketAge > 60 ? 'good' : marketAge > 14 ? 'neutral' : 'bad', context: marketAge == null ? null : marketAge > 60 ? 'Established' : marketAge > 14 ? 'Maturing' : 'Very new' };
-
-  const endTime = gammaMarket.endDate;
-  let daysToResolution = null;
-  if (endTime) { daysToResolution = Math.floor((new Date(endTime) - now) / (1000 * 60 * 60 * 24)); if (daysToResolution < 0) daysToResolution = 0; }
-  metrics.daysToResolution = { value: daysToResolution, unit: 'days', score: null, signal: daysToResolution == null ? 'unavailable' : daysToResolution > 30 ? 'good' : daysToResolution > 7 ? 'neutral' : 'warn', context: daysToResolution == null ? null : daysToResolution > 60 ? 'Plenty of time' : daysToResolution > 14 ? 'Adequate time' : 'Approaching resolution' };
-
-  let lifecycleStage = null;
-  if (marketAge != null && daysToResolution != null) { const total = marketAge + daysToResolution; const pct = total > 0 ? (marketAge / total) * 100 : 0; if (pct < 25) lifecycleStage = 'Early'; else if (pct < 50) lifecycleStage = 'Growth'; else if (pct < 75) lifecycleStage = 'Mature'; else if (pct < 90) lifecycleStage = 'Late'; else lifecycleStage = 'Near Expiry'; }
-  const stageScores = { 'Early': 5, 'Growth': 8, 'Mature': 10, 'Late': 6, 'Near Expiry': 3 };
-  metrics.lifecycleStage = { value: lifecycleStage, unit: 'stage', score: lifecycleStage ? stageScores[lifecycleStage] : null, signal: lifecycleStage == null ? 'unavailable' : lifecycleStage === 'Mature' || lifecycleStage === 'Growth' ? 'good' : lifecycleStage === 'Near Expiry' ? 'warn' : 'neutral', context: lifecycleStage == null ? null : lifecycleStage === 'Growth' || lifecycleStage === 'Mature' ? 'Optimal stage' : lifecycleStage };
-
-  let priceStability = null;
-  let historyPrices = [];
-  if (priceHistory30d) { const raw = Array.isArray(priceHistory30d.history) ? priceHistory30d.history : Array.isArray(priceHistory30d) ? priceHistory30d : []; historyPrices = raw.map(c => c.p).filter(p => p != null); }
-  if (historyPrices.length >= 5) { const mean = historyPrices.reduce((a,b) => a+b, 0) / historyPrices.length; const variance = historyPrices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / historyPrices.length; priceStability = Math.sqrt(variance); }
-  metrics.priceStability = { value: fmt(priceStability, 4), unit: 'σ', score: priceStability != null ? (11 - scoreBetween(priceStability, 0.01, 0.3)) : null, signal: priceStability == null ? 'unavailable' : priceStability < 0.05 ? 'good' : priceStability < 0.15 ? 'neutral' : 'bad', context: priceStability == null ? null : priceStability < 0.05 ? 'Stable pricing' : priceStability < 0.15 ? 'Moderate variability' : 'Volatile pricing' };
-
-  let activityTrend = null;
-  if (allTrades && allTrades.length > 0) {
-    const nowSec = Date.now() / 1000;
-    const recent = allTrades.filter(t => (t.timestamp||0) >= nowSec - 86400*7).length;
-    const older = allTrades.filter(t => { const ts = t.timestamp||0; return ts >= nowSec - 86400*14 && ts < nowSec - 86400*7; }).length;
-    if (older > 0) activityTrend = recent / older;
-    else if (recent > 0) activityTrend = 2.0;
-  }
-  metrics.activityTrend = { value: fmt(activityTrend, 2), unit: 'ratio', score: activityTrend != null ? scoreBetween(activityTrend, 0.2, 3) : null, signal: activityTrend == null ? 'unavailable' : activityTrend > 1.2 ? 'good' : activityTrend > 0.5 ? 'neutral' : 'bad', context: activityTrend == null ? null : activityTrend > 1.5 ? 'Growing' : activityTrend > 0.8 ? 'Stable' : 'Declining' };
-
-  const totalVolume = parseFloat(gammaMarket.volume || 0);
-  metrics.totalVolume = { value: totalVolume > 0 ? fmt(totalVolume, 2) : null, unit: 'USD', score: scoreBetween(totalVolume, 10000, 5000000), signal: totalVolume > 1000000 ? 'good' : totalVolume > 100000 ? 'neutral' : 'bad', context: totalVolume > 1000000 ? 'High lifetime volume' : totalVolume > 100000 ? 'Moderate volume' : 'Low volume' };
-
-  let exitLiquidity = null;
-  let exitLabel = null;
-  if (orderbook && midValue && lifecycleStage) {
-    const bids = orderbook.bids || [];
-    let bidDepth5 = 0;
-    for (const bid of bids) {
-      const p = parseFloat(bid.price), s = parseFloat(bid.size);
-      const d = ((midValue - p) / midValue) * 100;
-      if (d <= 5) bidDepth5 += p * s;
-    }
-    const depthScore = scoreBetween(bidDepth5, 1000, 100000);
-    const stageMultiplier = { 'Early': 0.7, 'Growth': 1.0, 'Mature': 1.0, 'Late': 0.6, 'Near Expiry': 0.3 };
-    exitLiquidity = parseFloat((depthScore * (stageMultiplier[lifecycleStage] || 0.5)).toFixed(1));
-    exitLabel = exitLiquidity >= 7 ? 'Good' : exitLiquidity >= 4 ? 'Moderate' : 'Poor';
-  }
-  metrics.exitLiquidity = { value: exitLabel, unit: 'assessment', score: exitLiquidity != null ? Math.round(exitLiquidity) : null, signal: exitLiquidity == null ? 'unavailable' : exitLiquidity >= 7 ? 'good' : exitLiquidity >= 4 ? 'neutral' : 'bad', context: daysToResolution != null ? `${daysToResolution} days runway` : null };
-
-  const scorable = ['marketAge', 'lifecycleStage', 'priceStability', 'activityTrend', 'totalVolume', 'exitLiquidity'];
-  const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
-
-  let warning = null;
-  if (lifecycleStage === 'Near Expiry') warning = { type: 'danger', text: `Market approaching expiry. ${daysToResolution} days remaining. Exit liquidity may deteriorate rapidly.` };
-  else if (activityTrend != null && activityTrend < 0.5) warning = { type: 'warning', text: 'Declining activity. Trading volume has dropped significantly.' };
-  else if (exitLabel === 'Poor') warning = { type: 'warning', text: 'Poor exit liquidity. You may have difficulty selling your position at a fair price.' };
-  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: `Good timing. Market in ${lifecycleStage} phase with ${activityTrend > 1.2 ? 'growing' : 'stable'} activity. ${daysToResolution} days until resolution.` };
-
-  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 3 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 7, warning, metrics };
 }
 
 // ─── RESOLUTION PILLAR ───────────────────────────────────────
@@ -649,38 +506,34 @@ module.exports = async function handler(req, res) {
     const DOME_API_KEY = process.env.DOME_API_KEY;
     const startTime = Date.now();
 
+    // 7 parallel calls: CLOB (3) + DATA API (2) + Dome (2)
     const results = await Promise.allSettled([
-      fetch(`https://clob.polymarket.com/book?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),           // 0
-      fetch(`https://clob.polymarket.com/spread?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),         // 1
-      fetch(`https://clob.polymarket.com/midpoint?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),       // 2
-      fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1d&fidelity=30`).then(r => r.ok ? r.json() : null),  // 3
-      fetch(`https://clob.polymarket.com/prices-history?market=${primaryTokenId}&interval=1h&fidelity=24`).then(r => r.ok ? r.json() : null),  // 4
-      fetch(`https://data-api.polymarket.com/holders?market=${conditionId}`).then(r => r.ok ? r.json() : null),         // 5
-      fetch(`https://data-api.polymarket.com/oi?market=${conditionId}`).then(r => r.ok ? r.json() : null),              // 6
-      fetchDomeCandles(conditionId, 14, 1440, DOME_API_KEY),  // 7
-      fetchDomeTrades(conditionId, 7, DOME_API_KEY, 3),       // 8
+      fetch(`https://clob.polymarket.com/book?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),      // 0
+      fetch(`https://clob.polymarket.com/spread?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),    // 1
+      fetch(`https://clob.polymarket.com/midpoint?token_id=${primaryTokenId}`).then(r => r.ok ? r.json() : null),  // 2
+      fetch(`https://data-api.polymarket.com/holders?market=${conditionId}`).then(r => r.ok ? r.json() : null),    // 3
+      fetch(`https://data-api.polymarket.com/oi?market=${conditionId}`).then(r => r.ok ? r.json() : null),         // 4
+      fetchDomeCandles(conditionId, 14, 1440, DOME_API_KEY),  // 5
+      fetchDomeTrades(conditionId, 7, DOME_API_KEY, 3),       // 6
     ]);
 
     const fetchTime = ((Date.now() - startTime) / 1000).toFixed(2);
     const get = (i) => results[i].status === 'fulfilled' ? results[i].value : null;
 
     const orderbook = get(0), spread = get(1), midpoint = get(2);
-    const priceHistory30d = get(3), priceHistory24h = get(4);
-    const holders = get(5), openInterest = get(6);
-    const domeCandles14d = get(7);
-    const domeTrades = get(8);
+    const holders = get(3), openInterest = get(4);
+    const domeCandles14d = get(5);
+    const domeTrades = get(6);
 
     const allTrades = Array.isArray(domeTrades) ? domeTrades : [];
 
-    // Compute all 5 pillars
+    // Compute 3 pillars
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, domeTrades);
-    const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h);
     const participation = computeParticipationMetrics(holders, allTrades);
-    const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades, orderbook, midpoint);
     const resolution = computeResolutionMetrics(market, openInterest, holders);
 
     const blockingIssues = [];
-    const pillarEntries = { liquidity, discovery, participation, maturity, resolution };
+    const pillarEntries = { liquidity, participation, resolution };
     for (const [name, pillar] of Object.entries(pillarEntries)) {
       if (pillar.score != null && pillar.score < 3) {
         blockingIssues.push({ pillar: name, score: pillar.score, warning: pillar.warning?.text || `${name} score critically low` });
@@ -712,14 +565,13 @@ module.exports = async function handler(req, res) {
         tokenIds: { yes: primaryTokenId, no: secondaryTokenId || null },
       },
 
-      scores: { liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score },
-      pillars: { liquidity, discovery, participation, maturity, resolution },
+      scores: { liquidity: liquidity.score, participation: participation.score, resolution: resolution.score },
+      pillars: { liquidity, participation, resolution },
 
       rawData: {
         orderbook: orderbook ? { bids: orderbook.bids ? orderbook.bids.length : 0, asks: orderbook.asks ? orderbook.asks.length : 0, bestBid: orderbook.bids?.[0] || null, bestAsk: orderbook.asks?.[0] || null } : null,
         spread: spread || null,
         midpoint: midpoint || null,
-        priceHistory: { daily30d: priceHistory30d ? { points: Array.isArray(priceHistory30d.history) ? priceHistory30d.history.length : Array.isArray(priceHistory30d) ? priceHistory30d.length : 0 } : null, hourly24h: priceHistory24h ? { points: Array.isArray(priceHistory24h.history) ? priceHistory24h.history.length : Array.isArray(priceHistory24h) ? priceHistory24h.length : 0 } : null },
         holders: holders ? { sides: Array.isArray(holders) ? holders.length : 0, totalTopHolders: Array.isArray(holders) ? holders.reduce((sum, s) => sum + (s.holders ? s.holders.length : 0), 0) : 0 } : null,
         openInterest: openInterest || null,
         dome: { candles: Array.isArray(domeCandles14d) ? domeCandles14d.length : 0, trades: allTrades.length },
