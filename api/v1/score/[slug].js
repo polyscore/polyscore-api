@@ -481,17 +481,6 @@ function computeResolutionMetrics(gammaMarket, openInterest, holders) {
   return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 6 ? 'high' : scores.length >= 4 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, llmAnalysis: 'Not yet enabled — Claude API integration coming Phase 2', metrics };
 }
 
-// ─── COMPOSITE POLYSCORE ─────────────────────────────────────
-
-function computePolyScore(liquidity, discovery, participation, maturity, resolution) {
-  const weights = { liquidity: 0.25, discovery: 0.15, participation: 0.20, maturity: 0.15, resolution: 0.25 };
-  const pillarScores = { liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score };
-  let weightedSum = 0, totalWeight = 0;
-  for (const [key, weight] of Object.entries(weights)) { if (pillarScores[key] != null) { weightedSum += pillarScores[key] * weight; totalWeight += weight; } }
-  if (totalWeight === 0) return null;
-  return parseFloat((weightedSum / totalWeight).toFixed(1));
-}
-
 // ─── MAIN HANDLER ────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
@@ -554,22 +543,19 @@ module.exports = async function handler(req, res) {
     const maturity = computeMaturityMetrics(market, priceHistory30d, allTrades, orderbook, midpoint);
     const resolution = computeResolutionMetrics(market, openInterest, holders);
 
-    const polyscore = computePolyScore(liquidity, discovery, participation, maturity, resolution);
-
-const risk = polyscore >= 7 ? { level: 'low', label: 'Low Risk' } : polyscore >= 4 ? { level: 'elevated', label: 'Elevated' } : polyscore != null ? { level: 'high', label: 'High Risk' } : { level: 'unknown', label: 'Unknown' };
-
-const blockingIssues = [];
-const pillarEntries = { liquidity, discovery, participation, maturity, resolution };
-for (const [name, pillar] of Object.entries(pillarEntries)) {
-  if (pillar.score != null && pillar.score < 3) {
-    blockingIssues.push({ pillar: name, score: pillar.score, warning: pillar.warning?.text || `${name} score critically low` });
-  }
-}
+    const blockingIssues = [];
+    const pillarEntries = { liquidity, discovery, participation, maturity, resolution };
+    for (const [name, pillar] of Object.entries(pillarEntries)) {
+      if (pillar.score != null && pillar.score < 3) {
+        blockingIssues.push({ pillar: name, score: pillar.score, warning: pillar.warning?.text || `${name} score critically low` });
+      }
+    }
+    const risk = blockingIssues.length > 0 ? { level: 'elevated', label: 'Blocking issues detected' } : { level: 'low', label: 'No blocking issues' };
 
 const outcomes = market.outcomes ? JSON.parse(market.outcomes) : ['Yes', 'No'];
 return res.status(200).json({
-  polyscore,
-  polyscoreStatus: polyscore != null ? 'All 5 pillars computed' : 'Partial — some pillars unavailable',
+
+
   risk,
   blockingIssues,
   fetchTime: parseFloat(fetchTime),
@@ -593,7 +579,7 @@ return res.status(200).json({
         tokenIds: { yes: primaryTokenId, no: secondaryTokenId || null },
       },
 
-      scores: { overall: polyscore, liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score },
+      scores: { liquidity: liquidity.score, discovery: discovery.score, participation: participation.score, maturity: maturity.score, resolution: resolution.score },
       pillars: { liquidity, discovery, participation, maturity, resolution },
 
       rawData: {
