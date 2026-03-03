@@ -14,6 +14,15 @@ module.exports = async function handler(req, res) {
     var urlMatch = q.match(/polymarket\.com\/(?:event|market)\/([a-z0-9-]+)/i);
     if (urlMatch) query = urlMatch[1].split('?')[0];
 
+    function getMarketStatus(m) {
+      var umaStatus = m.umaResolutionStatus || null;
+      if (m.closed) return 'closed';
+      if (!m.active) return 'inactive';
+      if (umaStatus === 'disputed') return 'disputed';
+      if (umaStatus === 'proposed') return 'proposed';
+      return 'open';
+    }
+
     function formatMarket(m) {
       var outcomes = [], outcomePrices = [];
       try { outcomes = JSON.parse(m.outcomes || '[]'); } catch(e) {}
@@ -24,10 +33,9 @@ module.exports = async function handler(req, res) {
         groupItemTitle: m.groupItemTitle || null,
         slug: m.slug,
         conditionId: m.conditionId,
-        active: m.active,
-        closed: m.closed,
-        outcomes: outcomes,
-        outcomePrices: outcomePrices,
+        status: getMarketStatus(m),
+        outcomes,
+        outcomePrices,
         volume: m.volume || null,
         liquidity: m.liquidity || null,
         startDate: m.startDate || null,
@@ -37,38 +45,12 @@ module.exports = async function handler(req, res) {
 
     function sortMarkets(markets) {
       if (markets.length <= 1) return markets;
-      var leadingNums = markets.map(function(m) {
-        var title = (m.groupItemTitle || '').toString();
-        var match = title.match(/^(\d+)/);
-        return match ? parseFloat(match[1]) : null;
-      });
-      var allHaveLeadingNum = leadingNums.every(function(n) { return n !== null; });
-      var uniqueNums = new Set(leadingNums.filter(function(n) { return n !== null; }));
-      if (allHaveLeadingNum && uniqueNums.size > 1) {
+      var titles = markets.map(function(m) { return (m.groupItemTitle || '').toString(); });
+      var allTitlesNumeric = titles.every(function(t) { return /^\d+\+?$/.test(t); });
+      if (allTitlesNumeric && new Set(titles).size > 1) {
         return markets.sort(function(a, b) {
-          var aMatch = a.groupItemTitle.match(/^(\d+)/);
-          var bMatch = b.groupItemTitle.match(/^(\d+)/);
-          return parseFloat(aMatch[1]) - parseFloat(bMatch[1]);
+          return parseFloat(a.groupItemTitle) - parseFloat(b.groupItemTitle);
         });
-      }
-      var hasArrows = markets.some(function(m) {
-        var t = (m.groupItemTitle || '').toString();
-        return t.indexOf('\u2193') !== -1 || t.indexOf('\u2191') !== -1;
-      });
-      if (hasArrows) {
-        var downs = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('\u2193') !== -1; });
-        var ups = markets.filter(function(m) { return (m.groupItemTitle || '').indexOf('\u2191') !== -1; });
-        var others = markets.filter(function(m) {
-          var t = m.groupItemTitle || '';
-          return t.indexOf('\u2193') === -1 && t.indexOf('\u2191') === -1;
-        });
-        var getRate = function(m) {
-          var match = (m.groupItemTitle || '').match(/([\d.]+)%/);
-          return match ? parseFloat(match[1]) : 0;
-        };
-        downs.sort(function(a, b) { return getRate(b) - getRate(a); });
-        ups.sort(function(a, b) { return getRate(a) - getRate(b); });
-        return downs.concat(ups).concat(others);
       }
       return markets.sort(function(a, b) {
         var aPrice = 0, bPrice = 0;
@@ -86,9 +68,22 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    function getEventStatus(event) {
+      // Check if any sub-market is disputed
+      var markets = event.markets || [];
+      var hasDisputed = markets.some(function(m) { return (m.umaResolutionStatus || '') === 'disputed'; });
+      var hasProposed = markets.some(function(m) { return (m.umaResolutionStatus || '') === 'proposed'; });
+      if (event.closed) return 'closed';
+      if (!event.active) return 'inactive';
+      if (hasDisputed) return 'disputed';
+      if (hasProposed) return 'proposed';
+      return 'open';
+    }
+
     function formatEvent(event) {
-      var activeMarkets = (event.markets || []).filter(function(m) { return m.active && !m.closed; });
-      var sorted = sortMarkets(activeMarkets);
+      // Include disputed/proposed markets (they're still active), exclude only truly closed
+      var visibleMarkets = (event.markets || []).filter(function(m) { return m.active; });
+      var sorted = sortMarkets(visibleMarkets);
       var markets = sorted.map(formatMarket);
       return {
         id: event.id,
@@ -96,14 +91,13 @@ module.exports = async function handler(req, res) {
         slug: event.slug,
         image: event.image || event.icon || null,
         description: event.description ? event.description.slice(0, 200) + '...' : null,
-        active: event.active,
-        closed: event.closed,
+        status: getEventStatus(event),
         volume: event.volume || null,
         liquidity: event.liquidity || null,
         startDate: event.startDate || null,
         endDate: event.endDate || null,
         marketCount: markets.length,
-        markets: markets,
+        markets,
       };
     }
 
@@ -112,7 +106,7 @@ module.exports = async function handler(req, res) {
       var eventRes = await fetch('https://gamma-api.polymarket.com/events/slug/' + encodeURIComponent(query));
       if (eventRes.ok) {
         var event = await eventRes.json();
-        if (event && event.id && event.active && !event.closed) {
+        if (event && event.id && event.active) {
           return res.status(200).json({
             query: q,
             resultCount: 1,
@@ -128,14 +122,14 @@ module.exports = async function handler(req, res) {
     if (!gammaRes.ok) throw new Error('GAMMA search failed: ' + gammaRes.status);
     var data = await gammaRes.json();
     var events = (data.events || [])
-      .filter(function(e) { return e.active && !e.closed; })
+      .filter(function(e) { return e.active; })
       .slice(0, 20)
       .map(formatEvent);
 
     return res.status(200).json({
       query: q,
       resultCount: events.length,
-      events: events,
+      events,
     });
   } catch (err) {
     console.error('Search endpoint error:', err);
