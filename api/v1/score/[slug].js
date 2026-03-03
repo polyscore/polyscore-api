@@ -731,12 +731,6 @@ const domeTrades = get(8);
 
 const allTrades = Array.isArray(domeTrades) ? domeTrades : [];
 
-    // Merge trade batches
-    const allTrades = [
-      ...(Array.isArray(trades1) ? trades1 : []),
-      ...(Array.isArray(trades2) ? trades2 : []),
-    ];
-
     // Compute all 5 pillars
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, domeTrades);
     const discovery = computeDiscoveryMetrics(midpoint, priceHistory30d, priceHistory24h);
