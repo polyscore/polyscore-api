@@ -182,12 +182,16 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
     if (volPrior7d > 0) volumeTrend = ((vol7d - volPrior7d) / volPrior7d) * 100;
     else if (vol7d > 0) volumeTrend = 100;
   }
+  const cappedVolTrend = volumeTrend != null ? Math.max(-200, Math.min(200, volumeTrend)) : null;
+  const volTrendCapped = volumeTrend != null && Math.abs(volumeTrend) > 200;
   metrics.volumeTrend = {
-    value: fmt(volumeTrend, 1),
+    value: fmt(cappedVolTrend, 1),
     unit: '%',
     score: volumeTrend != null ? scoreBetween(volumeTrend, -50, 100) : null,
     signal: volumeTrend == null ? 'unavailable' : volumeTrend > 10 ? 'good' : volumeTrend > -10 ? 'neutral' : 'bad',
     context: volumeTrend == null ? null
+      : volTrendCapped && volumeTrend > 0 ? 'New or surging market — volume up sharply'
+      : volTrendCapped && volumeTrend < 0 ? 'Volume collapsed'
       : volumeTrend > 20 ? 'Growing interest'
       : volumeTrend > -10 ? 'Stable activity'
       : 'Declining — market losing attention',
@@ -465,12 +469,16 @@ function computeParticipationMetrics(holders, allTrades, domeCandles14d) {
       oiTrend7d = ((recentOI - priorOI) / priorOI) * 100;
     }
   }
+  const cappedOiTrend = oiTrend7d != null ? Math.max(-200, Math.min(200, oiTrend7d)) : null;
+  const oiTrendCapped = oiTrend7d != null && Math.abs(oiTrend7d) > 200;
   metrics.oiTrend7d = {
-    value: fmt(oiTrend7d, 1),
+    value: fmt(cappedOiTrend, 1),
     unit: '%',
     score: oiTrend7d != null ? scoreBetween(oiTrend7d, -30, 50) : null,
     signal: oiTrend7d == null ? 'unavailable' : oiTrend7d > 10 ? 'good' : oiTrend7d > -10 ? 'neutral' : 'bad',
     context: oiTrend7d == null ? null
+      : oiTrendCapped && oiTrend7d > 0 ? 'New market — OI growing rapidly'
+      : oiTrendCapped && oiTrend7d < 0 ? 'Severe outflow — positions closing fast'
       : oiTrend7d > 20 ? 'Money flowing in — growing conviction'
       : oiTrend7d > 0 ? 'Stable interest'
       : oiTrend7d > -20 ? 'Slight outflow'
