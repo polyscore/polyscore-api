@@ -701,7 +701,7 @@ function computeResolutionMetrics(gammaMarket, openInterest) {
   metrics.openInterest = {
     value: fmt(oiValue, 2),
     unit: 'USD',
-    score: oiValue != null ? scoreBetween(oiValue, 5000, 2000000) : null,
+    score: oiValue != null ? scoreBetween(oiValue, 5000, 1000000) : null,
     signal: oiValue == null ? 'unavailable' : oiValue > 500000 ? 'good' : oiValue > 50000 ? 'neutral' : 'bad',
     context: oiValue == null ? null
       : oiValue > 500000 ? '$' + Math.round(oiValue).toLocaleString() + ' at stake — high scrutiny'
@@ -716,11 +716,11 @@ function computeResolutionMetrics(gammaMarket, openInterest) {
   metrics.disputeViability = {
     value: fmt(oiBondRatio, 0),
     unit: '×',
-    score: oiBondRatio != null ? scoreBetween(oiBondRatio, 10, 2000) : null,
-    signal: oiBondRatio == null ? 'unavailable' : oiBondRatio > 500 ? 'good' : oiBondRatio > 50 ? 'neutral' : 'bad',
+    score: oiBondRatio != null ? scoreBetween(oiBondRatio, 10, 1000) : null,
+    signal: oiBondRatio == null ? 'unavailable' : oiBondRatio > 200 ? 'good' : oiBondRatio > 30 ? 'neutral' : 'bad',
     context: oiBondRatio == null ? null
-      : oiBondRatio > 500 ? 'OI is ' + fmt(oiBondRatio, 0) + '× the $750 dispute bond — strong incentive to challenge bad resolution'
-      : oiBondRatio > 50 ? 'Dispute viable but marginal'
+      : oiBondRatio > 200 ? 'OI is ' + fmt(oiBondRatio, 0) + '× the $750 dispute bond — strong incentive to challenge bad resolution'
+      : oiBondRatio > 30 ? 'OI is ' + fmt(oiBondRatio, 0) + '× the $750 bond — dispute viable'
       : 'OI too low relative to $750 bond — nobody will dispute even if resolution is wrong',
   };
 
@@ -793,6 +793,8 @@ function computeResolutionMetrics(gammaMarket, openInterest) {
       warnings.push({ type: 'warning', text: 'Low dispute incentive — OI ($' + Math.round(oiValue).toLocaleString() + ') is only ' + fmt(oiBondRatio, 0) + '× the $750 bond. Wrong resolution unlikely to be challenged.' });
     } else if (isOpenEnded) {
       warnings.push({ type: 'warning', text: 'No end date. Your capital could be locked indefinitely.' });
+    } else if (isExpiring) {
+      warnings.push({ type: 'warning', text: 'Resolution in ' + daysLeft + ' days. If the outcome is ambiguous, there may not be time for the market to self-correct.' });
     }
   }
 
