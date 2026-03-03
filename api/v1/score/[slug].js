@@ -136,7 +136,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
       : 'Spread consumes ' + fmt(spreadEdgePct, 0) + '% of your potential profit',
   };
 
-  // 5. Volume 24h (Dome candles — shares/1M * mean_dollars)
+  // 5. Volume 24h (Dome candles)
   let volume24h = null;
   if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length > 0) {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -164,7 +164,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
       : 'No trades in 24 hours',
   };
 
-  // 6. Volume Trend (7d vs prior 7d, from Dome candles)
+  // 6. Volume Trend (7d vs prior 7d)
   let volumeTrend = null;
   if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length > 0) {
     const nowSec = Math.floor(Date.now() / 1000);
@@ -229,7 +229,7 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
       : 'Fragile — even small trades move the price',
   };
 
-  // 8. Time Since Last Trade (Dome trades)
+  // 8. Time Since Last Trade
   let timeSinceLastTrade = null;
   if (domeTrades && domeTrades.length > 0) {
     let maxTs = 0;
@@ -329,80 +329,294 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
 
 // ─── PARTICIPATION PILLAR ────────────────────────────────────
 
-function computeParticipationMetrics(holders, allTrades) {
+function computeParticipationMetrics(holders, allTrades, domeCandles14d) {
   const metrics = {};
   const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
 
-  let allPositions = [];
+  // ── Parse holder data (DATA API — top 20 per side) ────────
+  let yesPositions = [], noPositions = [];
   if (holders && Array.isArray(holders)) {
     for (const side of holders) {
-      if (side.holders && Array.isArray(side.holders)) {
-        for (const h of side.holders) allPositions.push(parseFloat(h.amount || 0));
+      const sideHolders = side.holders && Array.isArray(side.holders) ? side.holders : [];
+      const label = (side.outcome || side.token_id || '').toString().toLowerCase();
+      const isYes = label.includes('yes') || label === '0' || label === holders[0]?.outcome;
+      for (const h of sideHolders) {
+        const amt = parseFloat(h.amount || 0);
+        if (isYes || holders.indexOf(side) === 0) yesPositions.push(amt);
+        else noPositions.push(amt);
+      }
+    }
+  }
+  const allPositions = [...yesPositions, ...noPositions];
+  const sortedPositions = [...allPositions].sort((a, b) => b - a);
+  const totalAmount = sortedPositions.reduce((a, b) => a + b, 0);
+
+  // ── Parse trade data (Dome trades) ────────────────────────
+  const uniqueWallets = new Set();
+  const yesWallets = new Set(), noWallets = new Set();
+  const tradeSizes = [];
+  const largeTrades = []; // trades > $500
+  if (allTrades && allTrades.length > 0) {
+    for (const trade of allTrades) {
+      const wallet = trade.user || trade.proxyWallet;
+      const price = parseFloat(trade.price || 0);
+      const shares = parseFloat(trade.shares_normalized || trade.size || 0);
+      const dollarValue = shares * price;
+      const side = (trade.side || '').toUpperCase();
+      const token = (trade.token_label || '').toLowerCase();
+
+      if (wallet) {
+        uniqueWallets.add(wallet);
+        if (token === 'yes') yesWallets.add(wallet);
+        else if (token === 'no') noWallets.add(wallet);
+      }
+      if (dollarValue > 0) tradeSizes.push(dollarValue);
+      if (dollarValue >= 500) {
+        // Determine bullish or bearish
+        // BUY YES or SELL NO = bullish. SELL YES or BUY NO = bearish.
+        const isBullish = (side === 'BUY' && token === 'yes') || (side === 'SELL' && token === 'no');
+        largeTrades.push({ value: dollarValue, bullish: isBullish });
       }
     }
   }
 
-  const uniqueWallets = new Set();
-  const tradeSizes = [];
-  if (allTrades && allTrades.length > 0) {
-    for (const trade of allTrades) {
-      const wallet = trade.proxyWallet || trade.user;
-      if (wallet) uniqueWallets.add(wallet);
-      const price = parseFloat(trade.price || 0);
-      const shares = parseFloat(trade.shares_normalized || trade.size || 0);
-      const size = shares * price;
-      if (size > 0) tradeSizes.push(size);
+  // ── 1. Unique Wallets (7d) ────────────────────────────────
+  const walletCount = uniqueWallets.size;
+  metrics.uniqueWallets = {
+    value: walletCount,
+    unit: 'wallets',
+    score: scoreBetween(walletCount, 10, 1000),
+    signal: walletCount === 0 ? 'unavailable' : walletCount > 200 ? 'good' : walletCount > 50 ? 'neutral' : 'bad',
+    context: walletCount === 0 ? null : walletCount + ' wallets traded in last 7 days',
+  };
+
+  // ── 2. Top 5 Concentration ────────────────────────────────
+  let top5Pct = null;
+  if (totalAmount > 0 && sortedPositions.length >= 5) {
+    top5Pct = (sortedPositions.slice(0, 5).reduce((a, b) => a + b, 0) / totalAmount) * 100;
+  }
+  metrics.top5Concentration = {
+    value: fmt(top5Pct, 1),
+    unit: '%',
+    score: top5Pct != null ? (11 - scoreBetween(top5Pct, 20, 90)) : null,
+    signal: top5Pct == null ? 'unavailable' : top5Pct < 30 ? 'good' : top5Pct < 60 ? 'neutral' : 'bad',
+    context: top5Pct == null ? null
+      : top5Pct < 30 ? 'Well distributed'
+      : top5Pct > 60 ? 'Top 5 wallets control ' + fmt(top5Pct, 0) + '% — whale-dominated'
+      : 'Moderate concentration',
+  };
+
+  // ── 3. Whale Exit Risk (largest position / daily volume) ──
+  const largestPos = sortedPositions.length > 0 ? sortedPositions[0] : null;
+  let whaleExitDays = null;
+  // Get volume24h from Dome candles
+  let vol24h = null;
+  if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length > 0) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oneDayAgo = nowSec - 86400;
+    let vol = 0;
+    for (const candle of domeCandles14d) {
+      const ts = candle.end_period_ts || 0;
+      if (ts >= oneDayAgo) {
+        const meanPrice = parseFloat(candle.price?.mean_dollars || 0);
+        const shares = parseFloat(candle.volume || 0);
+        vol += (shares / 1000000) * meanPrice;
+      }
+    }
+    if (vol > 0) vol24h = vol;
+  }
+  if (largestPos != null && vol24h != null && vol24h > 0) {
+    whaleExitDays = largestPos / vol24h;
+  }
+  metrics.whaleExitRisk = {
+    value: fmt(whaleExitDays, 1),
+    unit: 'days to unwind',
+    score: whaleExitDays != null ? (11 - scoreBetween(whaleExitDays, 1, 30)) : null,
+    signal: whaleExitDays == null ? 'unavailable' : whaleExitDays < 2 ? 'good' : whaleExitDays < 7 ? 'neutral' : 'bad',
+    context: whaleExitDays == null ? null
+      : whaleExitDays < 1 ? 'Largest holder ($' + Math.round(largestPos).toLocaleString() + ') could exit in under a day'
+      : whaleExitDays < 3 ? 'Largest holder ($' + Math.round(largestPos).toLocaleString() + ') needs ' + fmt(whaleExitDays, 1) + ' days to exit'
+      : whaleExitDays < 10 ? 'Largest holder ($' + Math.round(largestPos).toLocaleString() + ') would take ' + fmt(whaleExitDays, 0) + ' days to exit — exit would move the price'
+      : 'Largest holder ($' + Math.round(largestPos).toLocaleString() + ') trapped — ' + fmt(whaleExitDays, 0) + ' days to unwind at current volume',
+  };
+
+  // ── 4. OI Trend 7d (from Dome candles open_interest) ──────
+  let oiTrend7d = null;
+  if (domeCandles14d && Array.isArray(domeCandles14d) && domeCandles14d.length >= 2) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sevenDaysAgo = nowSec - 86400 * 7;
+
+    // Find the candle closest to 7 days ago and the most recent candle
+    let recentOI = null, priorOI = null;
+    let recentTs = 0, priorDist = Infinity;
+
+    for (const candle of domeCandles14d) {
+      const ts = candle.end_period_ts || 0;
+      const oi = parseFloat(candle.open_interest || 0);
+      if (oi <= 0) continue;
+
+      if (ts > recentTs) { recentTs = ts; recentOI = oi; }
+
+      const dist = Math.abs(ts - sevenDaysAgo);
+      if (dist < priorDist) { priorDist = dist; priorOI = oi; }
+    }
+
+    if (recentOI != null && priorOI != null && priorOI > 0) {
+      oiTrend7d = ((recentOI - priorOI) / priorOI) * 100;
+    }
+  }
+  metrics.oiTrend7d = {
+    value: fmt(oiTrend7d, 1),
+    unit: '%',
+    score: oiTrend7d != null ? scoreBetween(oiTrend7d, -30, 50) : null,
+    signal: oiTrend7d == null ? 'unavailable' : oiTrend7d > 10 ? 'good' : oiTrend7d > -10 ? 'neutral' : 'bad',
+    context: oiTrend7d == null ? null
+      : oiTrend7d > 20 ? 'Money flowing in — growing conviction'
+      : oiTrend7d > 0 ? 'Stable interest'
+      : oiTrend7d > -20 ? 'Slight outflow'
+      : 'Money leaving — positions being closed',
+  };
+
+  // ── 5. Side Balance (YES vs NO wallet count) ──────────────
+  const yesCount = yesWallets.size, noCount = noWallets.size;
+  const totalSided = yesCount + noCount;
+  let sideBalance = null;
+  if (totalSided > 0) {
+    sideBalance = yesCount / totalSided; // 0.5 = perfectly balanced
+  }
+  metrics.sideBalance = {
+    value: sideBalance != null ? { yes: yesCount, no: noCount, ratio: fmt(sideBalance, 3) } : null,
+    unit: 'ratio',
+    score: sideBalance != null ? scoreCloseTo(sideBalance, 0.5, 0.5) : null,
+    signal: sideBalance == null ? 'unavailable' : Math.abs(sideBalance - 0.5) < 0.15 ? 'good' : Math.abs(sideBalance - 0.5) < 0.3 ? 'neutral' : 'bad',
+    context: sideBalance == null ? null
+      : Math.abs(sideBalance - 0.5) < 0.1 ? yesCount + ' YES / ' + noCount + ' NO — evenly split'
+      : sideBalance > 0.65 ? yesCount + ' YES / ' + noCount + ' NO — YES side crowded'
+      : sideBalance < 0.35 ? yesCount + ' YES / ' + noCount + ' NO — NO side crowded'
+      : yesCount + ' YES / ' + noCount + ' NO',
+  };
+
+  // ── 6. Smart Money Direction (large trades > $500) ────────
+  let smartMoneyDirection = null;
+  let smartMoneyLabel = null;
+  if (largeTrades.length >= 3) {
+    const bullishValue = largeTrades.filter(t => t.bullish).reduce((s, t) => s + t.value, 0);
+    const bearishValue = largeTrades.filter(t => !t.bullish).reduce((s, t) => s + t.value, 0);
+    const totalLargeValue = bullishValue + bearishValue;
+    if (totalLargeValue > 0) {
+      smartMoneyDirection = ((bullishValue - bearishValue) / totalLargeValue); // -1 to +1
+      smartMoneyLabel = smartMoneyDirection > 0.2 ? 'Bullish' : smartMoneyDirection < -0.2 ? 'Bearish' : 'Mixed';
+    }
+  }
+  metrics.smartMoneyDirection = {
+    value: smartMoneyLabel,
+    unit: 'direction',
+    score: null, // informational — not scored
+    signal: smartMoneyDirection == null ? 'unavailable' : 'neutral',
+    context: smartMoneyDirection == null ? null
+      : largeTrades.length + ' large trades (>$500) — net ' + smartMoneyLabel.toLowerCase()
+        + ' ($' + Math.round(largeTrades.filter(t => t.bullish).reduce((s, t) => s + t.value, 0)).toLocaleString() + ' bullish'
+        + ' vs $' + Math.round(largeTrades.filter(t => !t.bullish).reduce((s, t) => s + t.value, 0)).toLocaleString() + ' bearish)',
+  };
+
+  // ── 7. Per-Side Concentration ─────────────────────────────
+  const yesSorted = [...yesPositions].sort((a, b) => b - a);
+  const noSorted = [...noPositions].sort((a, b) => b - a);
+  const yesTotal = yesSorted.reduce((a, b) => a + b, 0);
+  const noTotal = noSorted.reduce((a, b) => a + b, 0);
+  let yesTop5Pct = null, noTop5Pct = null;
+  if (yesTotal > 0 && yesSorted.length >= 5) yesTop5Pct = (yesSorted.slice(0, 5).reduce((a, b) => a + b, 0) / yesTotal) * 100;
+  if (noTotal > 0 && noSorted.length >= 5) noTop5Pct = (noSorted.slice(0, 5).reduce((a, b) => a + b, 0) / noTotal) * 100;
+
+  // Score the worse side — the more concentrated side is the risk
+  const worstConc = [yesTop5Pct, noTop5Pct].filter(v => v != null);
+  const maxConc = worstConc.length > 0 ? Math.max(...worstConc) : null;
+  metrics.perSideConcentration = {
+    value: yesTop5Pct != null || noTop5Pct != null ? { yes: fmt(yesTop5Pct, 1), no: fmt(noTop5Pct, 1) } : null,
+    unit: '%',
+    score: maxConc != null ? (11 - scoreBetween(maxConc, 30, 95)) : null,
+    signal: maxConc == null ? 'unavailable' : maxConc < 50 ? 'good' : maxConc < 75 ? 'neutral' : 'bad',
+    context: yesTop5Pct == null && noTop5Pct == null ? null
+      : 'YES top 5: ' + (yesTop5Pct != null ? fmt(yesTop5Pct, 0) + '%' : 'N/A')
+        + ' · NO top 5: ' + (noTop5Pct != null ? fmt(noTop5Pct, 0) + '%' : 'N/A'),
+  };
+
+  // ── 8. Median Trade Size ──────────────────────────────────
+  let medianTrade = null;
+  if (tradeSizes.length > 0) {
+    const st = [...tradeSizes].sort((a, b) => a - b);
+    const mid = Math.floor(st.length / 2);
+    medianTrade = st.length % 2 !== 0 ? st[mid] : (st[mid-1] + st[mid]) / 2;
+  }
+  metrics.medianTradeSize = {
+    value: fmt(medianTrade, 2),
+    unit: 'USD',
+    score: null, // informational
+    signal: medianTrade == null ? 'unavailable' : 'neutral',
+    context: medianTrade == null ? null
+      : medianTrade < 20 ? 'Typical trade: $' + fmt(medianTrade, 2) + ' — mostly retail'
+      : medianTrade < 200 ? 'Typical trade: $' + fmt(medianTrade, 2) + ' — mixed crowd'
+      : 'Typical trade: $' + fmt(medianTrade, 2) + ' — serious traders',
+  };
+
+  // ── PILLAR SCORE ──────────────────────────────────────────
+  const scorable = ['uniqueWallets', 'top5Concentration', 'whaleExitRisk', 'oiTrend7d', 'sideBalance', 'perSideConcentration'];
+  const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
+  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)) : null;
+
+  // ── WARNINGS ──────────────────────────────────────────────
+  const warnings = [];
+
+  const isWhaleTrapped = whaleExitDays != null && whaleExitDays > 10;
+  const isHighConc = top5Pct != null && top5Pct > 60;
+  const isOiDeclining = oiTrend7d != null && oiTrend7d < -20;
+  const isLopsided = sideBalance != null && (sideBalance > 0.8 || sideBalance < 0.2);
+  const isOneSideWhale = maxConc != null && maxConc > 80;
+  const isLowParticipation = walletCount > 0 && walletCount < 30;
+
+  // Combined warnings
+  if (isWhaleTrapped && isOiDeclining) {
+    warnings.push({ type: 'danger', text: 'Whale trapped in a shrinking market — largest position needs ' + fmt(whaleExitDays, 0) + ' days to unwind and open interest is down ' + fmt(Math.abs(oiTrend7d), 0) + '%. Their exit will crash the price.' });
+  } else if (isHighConc && isOneSideWhale) {
+    warnings.push({ type: 'danger', text: 'Whale-dominated market — top 5 hold ' + fmt(top5Pct, 0) + '% of OI and one side is ' + fmt(maxConc, 0) + '% concentrated. Price reflects a few wallets, not the crowd.' });
+  } else if (isLopsided && isOiDeclining) {
+    warnings.push({ type: 'warning', text: 'One-sided and shrinking — ' + (sideBalance > 0.5 ? yesCount + ' YES' : noCount + ' NO') + ' traders vs ' + (sideBalance > 0.5 ? noCount + ' NO' : yesCount + ' YES') + ' and money is flowing out.' });
+  }
+
+  // Single warnings
+  if (warnings.length === 0) {
+    if (isWhaleTrapped) {
+      warnings.push({ type: 'warning', text: 'Whale exit risk — largest position ($' + Math.round(largestPos).toLocaleString() + ') would take ' + fmt(whaleExitDays, 0) + ' days to unwind. If they sell, expect price disruption.' });
+    } else if (isHighConc) {
+      warnings.push({ type: 'warning', text: 'Top 5 wallets control ' + fmt(top5Pct, 0) + '% of open interest. This price may reflect a few large players, not broad consensus.' });
+    } else if (isOiDeclining) {
+      warnings.push({ type: 'warning', text: 'Open interest down ' + fmt(Math.abs(oiTrend7d), 0) + '% this week — money is leaving this market.' });
+    } else if (isLopsided) {
+      warnings.push({ type: 'warning', text: 'Lopsided participation — ' + yesCount + ' YES wallets vs ' + noCount + ' NO wallets. The minority side may be illiquid.' });
+    } else if (isOneSideWhale) {
+      warnings.push({ type: 'warning', text: 'One side is whale-dominated — top 5 hold ' + fmt(maxConc, 0) + '%. You may be trading against concentrated, informed capital.' });
+    } else if (isLowParticipation) {
+      warnings.push({ type: 'warning', text: 'Low participation — only ' + walletCount + ' unique wallets in last 7 days.' });
     }
   }
 
-  const walletCount = uniqueWallets.size;
-  metrics.uniqueWallets = { value: walletCount, unit: 'wallets', score: scoreBetween(walletCount, 10, 1000), signal: walletCount === 0 ? 'unavailable' : walletCount > 200 ? 'good' : walletCount > 50 ? 'neutral' : 'bad', context: walletCount === 0 ? null : walletCount > 200 ? 'Broad participation' : walletCount > 50 ? 'Moderate' : 'Low participation' };
-
-  const sorted = [...allPositions].sort((a, b) => b - a);
-  const totalAmount = sorted.reduce((a, b) => a + b, 0);
-  let top5Pct = null;
-  if (totalAmount > 0 && sorted.length >= 5) top5Pct = (sorted.slice(0, 5).reduce((a,b) => a+b, 0) / totalAmount) * 100;
-  metrics.top5Concentration = { value: fmt(top5Pct, 1), unit: '%', score: top5Pct != null ? (11 - scoreBetween(top5Pct, 20, 90)) : null, signal: top5Pct == null ? 'unavailable' : top5Pct < 30 ? 'good' : top5Pct < 60 ? 'neutral' : 'bad', context: top5Pct == null ? null : top5Pct < 30 ? 'Well distributed' : top5Pct > 60 ? 'Highly concentrated' : 'Moderate concentration' };
-
-  let top10Pct = null;
-  if (totalAmount > 0 && sorted.length >= 10) top10Pct = (sorted.slice(0, 10).reduce((a,b) => a+b, 0) / totalAmount) * 100;
-  metrics.top10Concentration = { value: fmt(top10Pct, 1), unit: '%', score: top10Pct != null ? (11 - scoreBetween(top10Pct, 30, 95)) : null, signal: top10Pct == null ? 'unavailable' : top10Pct < 50 ? 'good' : top10Pct < 75 ? 'neutral' : 'bad', context: top10Pct == null ? null : top10Pct < 50 ? 'Diverse holders' : top10Pct > 75 ? 'Top-heavy' : 'Moderate' };
-
-  let gini = null;
-  if (sorted.length >= 2 && totalAmount > 0) { const n = sorted.length; const asc = [...allPositions].sort((a,b) => a-b); let s = 0; for (let i = 0; i < n; i++) s += (2*(i+1) - n - 1) * asc[i]; gini = Math.max(0, Math.min(1, s / (n * totalAmount))); }
-  metrics.giniCoefficient = { value: fmt(gini, 3), unit: 'index', score: gini != null ? (11 - scoreBetween(gini, 0.2, 0.95)) : null, signal: gini == null ? 'unavailable' : gini < 0.4 ? 'good' : gini < 0.7 ? 'neutral' : 'bad', context: gini == null ? null : gini < 0.4 ? 'Relatively equal' : gini > 0.7 ? 'Unequal distribution' : 'Moderate inequality' };
-
-  let hhi = null;
-  if (sorted.length >= 2 && totalAmount > 0) {
-    hhi = 0;
-    for (const pos of sorted) { const share = (pos / totalAmount) * 100; hhi += share * share; }
+  // Positive
+  if (warnings.length === 0 && pillarScore != null && pillarScore >= 7) {
+    warnings.push({ type: 'info', text: 'Healthy participation — ' + walletCount + ' wallets, well-distributed positions, balanced sides.' });
   }
-  metrics.herfindahlIndex = { value: fmt(hhi, 0), unit: 'HHI', score: hhi != null ? (11 - scoreBetween(hhi, 500, 5000)) : null, signal: hhi == null ? 'unavailable' : hhi < 1500 ? 'good' : hhi < 2500 ? 'neutral' : 'bad', context: hhi == null ? null : hhi < 1500 ? 'Competitive' : hhi > 2500 ? 'Highly concentrated' : 'Moderate concentration' };
 
-  const largestPos = sorted.length > 0 ? sorted[0] : null;
-  metrics.largestPosition = { value: fmt(largestPos, 2), unit: 'USD', score: null, signal: largestPos == null ? 'unavailable' : 'neutral', context: largestPos != null ? `$${Math.round(largestPos).toLocaleString()} largest holder` : null };
+  const warning = warnings.length > 0 ? warnings[0] : null;
 
-  const retailCount = tradeSizes.filter(s => s < 100).length;
-  const retailRatio = tradeSizes.length > 0 ? (retailCount / tradeSizes.length) * 100 : null;
-  metrics.smallTradeShare = { value: fmt(retailRatio, 1), unit: '%', score: scoreBetween(retailRatio, 5, 70), signal: retailRatio == null ? 'unavailable' : retailRatio > 50 ? 'good' : retailRatio > 20 ? 'neutral' : 'bad', context: retailRatio == null ? null : retailRatio > 50 ? 'Retail-dominated' : retailRatio > 20 ? 'Mixed participation' : 'Whale-dominated' };
-
-  const whaleCount = tradeSizes.filter(s => s > 10000).length;
-  metrics.largeTradeCount = { value: whaleCount, unit: 'trades > $10K', score: null, signal: tradeSizes.length === 0 ? 'unavailable' : 'neutral', context: null };
-
-  let medianTrade = null;
-  if (tradeSizes.length > 0) { const st = [...tradeSizes].sort((a, b) => a - b); const mid = Math.floor(st.length / 2); medianTrade = st.length % 2 !== 0 ? st[mid] : (st[mid-1] + st[mid]) / 2; }
-  metrics.medianTradeSize = { value: fmt(medianTrade, 2), unit: 'USD', score: null, signal: medianTrade == null ? 'unavailable' : 'neutral', context: medianTrade != null ? `Typical trade: $${fmt(medianTrade, 2)}` : null };
-
-  const scorable = ['uniqueWallets', 'top5Concentration', 'top10Concentration', 'giniCoefficient', 'herfindahlIndex', 'smallTradeShare'];
-  const scores = scorable.map(k => metrics[k]?.score).filter(s => s != null);
-  const pillarScore = scores.length > 0 ? parseFloat((scores.reduce((a,b) => a+b, 0) / scores.length).toFixed(1)) : null;
-
-  let warning = null;
-  if (top5Pct != null && top5Pct > 60) warning = { type: 'danger', text: `High concentration risk. Top 5 wallets control ${fmt(top5Pct, 0)}% of open interest. Price may not reflect broad sentiment.` };
-  else if (walletCount > 0 && walletCount < 30) warning = { type: 'warning', text: `Low participation. Only ${walletCount} unique wallets detected.` };
-  else if (pillarScore != null && pillarScore >= 7) warning = { type: 'info', text: `Broad participation with ${walletCount} wallets and ${fmt(retailRatio, 0)}% small trades.` };
-
-  return { score: pillarScore, status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable', confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low', metricsComputed: scores.length, metricsTotal: 9, warning, metrics };
+  return {
+    score: pillarScore,
+    status: pillarScore >= 7 ? 'pass' : pillarScore >= 4 ? 'caution' : pillarScore != null ? 'fail' : 'unavailable',
+    confidence: scores.length >= 4 ? 'high' : scores.length >= 2 ? 'medium' : 'low',
+    metricsComputed: scores.length,
+    metricsTotal: 8,
+    warning,
+    warnings,
+    metrics,
+  };
 }
 
 // ─── RESOLUTION PILLAR ───────────────────────────────────────
@@ -529,7 +743,7 @@ module.exports = async function handler(req, res) {
 
     // Compute 3 pillars
     const liquidity = computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, domeTrades);
-    const participation = computeParticipationMetrics(holders, allTrades);
+    const participation = computeParticipationMetrics(holders, allTrades, domeCandles14d);
     const resolution = computeResolutionMetrics(market, openInterest, holders);
 
     const blockingIssues = [];
