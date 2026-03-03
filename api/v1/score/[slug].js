@@ -193,30 +193,39 @@ function computeLiquidityMetrics(orderbook, spread, midpoint, domeCandles14d, do
       : 'Declining — market losing attention',
   };
 
-  // 7. Kyle's Lambda (Dome trades — shares_normalized * price)
+  // 7. Kyle's Lambda (Dome trades — filtered to trades > $50 to reduce noise)
   let kyleLambda = null;
   if (domeTrades && domeTrades.length >= 10) {
-    const sorted = [...domeTrades].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-    let totalLambda = 0, count = 0;
-    for (let i = 1; i < sorted.length; i++) {
-      const prevPrice = parseFloat(sorted[i-1].price || 0);
-      const currPrice = parseFloat(sorted[i].price || 0);
-      const tradeValue = parseFloat(sorted[i].shares_normalized || 0) * currPrice;
-      if (tradeValue > 0.01 && prevPrice > 0) {
-        totalLambda += Math.abs(currPrice - prevPrice) / tradeValue;
-        count++;
+    const minTradeValue = 50;
+    const sorted = [...domeTrades]
+      .map(t => ({
+        price: parseFloat(t.price || 0),
+        value: parseFloat(t.shares_normalized || 0) * parseFloat(t.price || 0),
+        timestamp: t.timestamp || 0,
+      }))
+      .filter(t => t.value >= minTradeValue && t.price > 0)
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (sorted.length >= 10) {
+      let totalLambda = 0, count = 0;
+      for (let i = 1; i < sorted.length; i++) {
+        const priceDelta = Math.abs(sorted[i].price - sorted[i-1].price);
+        if (sorted[i].value > 0) {
+          totalLambda += priceDelta / sorted[i].value;
+          count++;
+        }
       }
+      if (count > 0) kyleLambda = totalLambda / count;
     }
-    if (count > 0) kyleLambda = totalLambda / count;
   }
   metrics.kyleLambda = {
     value: fmt(kyleLambda, 6),
     unit: 'λ',
-    score: kyleLambda != null ? (11 - scoreBetween(kyleLambda, 0.0001, 0.01)) : null,
-    signal: kyleLambda == null ? 'unavailable' : kyleLambda < 0.001 ? 'good' : kyleLambda < 0.005 ? 'neutral' : 'bad',
+    score: kyleLambda != null ? (11 - scoreBetween(kyleLambda, 0.00005, 0.005)) : null,
+    signal: kyleLambda == null ? 'unavailable' : kyleLambda < 0.0005 ? 'good' : kyleLambda < 0.002 ? 'neutral' : 'bad',
     context: kyleLambda == null ? null
-      : kyleLambda < 0.001 ? 'Stable — trades absorbed without moving price'
-      : kyleLambda < 0.005 ? 'Moderate price impact'
+      : kyleLambda < 0.0005 ? 'Stable — trades absorbed without moving price'
+      : kyleLambda < 0.002 ? 'Moderate price impact'
       : 'Fragile — even small trades move the price',
   };
 
